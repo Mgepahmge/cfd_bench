@@ -9,7 +9,7 @@ class Iotdb_Interface:
         self.time_step = time_step
         self.db_entity = None
 
-    def iotdb_connect():
+    def iotdb_connect(self):
         HOST = "127.0.0.1"
         PORT = "6667"
         USER = "root"
