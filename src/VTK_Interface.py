@@ -16,8 +16,8 @@ class VTK_Interface:
             # Get the output data
             vtk_mesh = reader.GetOutput()  # For unstructured grids
             # Access key properties
-            print(f"Number of points: {vtk_mesh.GetNumberOfPoints()}")
-            print(f"Number of cells: {vtk_mesh.GetNumberOfCells()}")
+            # print(f"Number of points: {vtk_mesh.GetNumberOfPoints()}")
+            # print(f"Number of cells: {vtk_mesh.GetNumberOfCells()}")
             return vtk_mesh
         else:
             print(f"Error, file {file} is not a .vtk file.")
@@ -127,7 +127,7 @@ class VTK_Interface:
             cell_indexes = []
             for i in range(original_ids.GetNumberOfTuples()):
                 cell_indexes.append(original_ids.GetValue(i))
-            print(f"Extracted cell Successfully, total {len(cell_indexes)} cells intersected with the plane.")
+            # print(f"Extracted cell Successfully, total {len(cell_indexes)} cells intersected with the plane.")
         else:
             print("No 'cell_indexes' array found in intersected cells.")
 
@@ -150,7 +150,7 @@ class VTK_Interface:
         extract_cells.Update()
         sub_mesh = extract_cells.GetOutput()
         
-        print(f"子网格：{sub_mesh.GetNumberOfPoints()} 个点，{sub_mesh.GetNumberOfCells()} 个单元格")
+        # print(f"子网格：{sub_mesh.GetNumberOfPoints()} 个点，{sub_mesh.GetNumberOfCells()} 个单元格")
         return sub_mesh
 
     def vtk_isosurface_extraction(vtk_mesh:vtkUnstructuredGrid, variable_name:str, iso_value:float) -> vtkPolyData:
@@ -164,7 +164,7 @@ class VTK_Interface:
         try:
             contour.Update()
             iso_surface = contour.GetOutput()
-            print(f"等值面：{iso_surface.GetNumberOfPoints()} 个点，{iso_surface.GetNumberOfCells()} 个单元格")
+            # print(f"等值面：{iso_surface.GetNumberOfPoints()} 个点，{iso_surface.GetNumberOfCells()} 个单元格")
         except Exception as e:
             print(f"Contour filter failed: {e}")
             return None

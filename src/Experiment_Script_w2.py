@@ -1,94 +1,190 @@
-import Experiment_Framework_DBInterfaces as DB_API
+import DB_Interface_PG as PG_API
+import DB_Interface_IoTDB as IoTDB_API
 import numpy as np
 from numpy.typing import NDArray
-from vtk import vtkCell, vtkCellLocator, vtkCellTypes, vtkPlane, vtkPolyData, vtkIdTypeArray, vtkUnstructuredGrid, vtkIdList
+import VTK_Interface as VTK_API
+import random
+import os
+from vtk import vtkUnstructuredGrid
+import time
+
 
 # A function that represents various simple tasks that should be implemented based on the context
-def place_holder():
-
-    return None
+def random_range(vtk_mesh:vtkUnstructuredGrid) -> NDArray[np.float64]:
+    bounds = vtk_mesh.GetBounds()
+    x1, x2 = sorted([random.uniform(bounds[0], bounds[1]), random.uniform(bounds[0], bounds[1])])
+    y1, y2 = sorted([random.uniform(bounds[2], bounds[3]), random.uniform(bounds[2], bounds[3])])
+    z1, z2 = sorted([random.uniform(bounds[4], bounds[5]), random.uniform(bounds[4], bounds[5])])
+    return np.array([[x1, y1, z1], [x2, y2, z2]])
 
 # In-memory computation for aggregated computation
 def aggregation(vals: NDArray[np.float64]) -> np.float64:
-    # TODO
-    return result
+    
+    mean_result = np.mean(vals)
+
+    max_result = np.max(vals)
+
+    min_result = np.min(vals)
+    
+    return mean_result, max_result, min_result
+
+def main():
+
+    ''' Pre-processing '''
+
+    pg_api = PG_API.PG_Interface()
+    pg_entity = pg_api.pg_connect()
+
+    iotdb_api = IoTDB_API.Iotdb_Interface()
+    iotdb_entity = iotdb_api.iotdb_connect()
+
+    # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+
+    vtk_api = VTK_API.VTK_Interface()
 
 
+    ''' Define ship types and time_step for query'''
+    SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
+    TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
+    VARIABLE_LIST = ["U", "V", "W", "P", "K", "E"]
+    VTK_MESH_DIR = "../vtk_dir/"
+    VTK_QUERY_DIR = "../vtk_db_dir/"
+    vtk_geo_files = [f for f in os.listdir(VTK_MESH_DIR) if f.endswith(".vtk")]
+    vtk_query_files = [f for f in os.listdir(VTK_QUERY_DIR) if f.endswith(".vtk")]
 
-''' Pre-processing '''
+    for ship_type in SHIP_TYPE_LIST:
 
-pg_entity = DB_API.PG_Interface.pg_connect()
+        if ship_type in ["JBC_3843k", "Kvlcc2_3709k"]:
+            valid_time_steps = [ts for ts in TIME_STEP_LIST if ts != "2000"]
+            # print(f"{ship_type} 数据集没有 2000 时间步，使用: {valid_time_steps}")
+        else:
+            valid_time_steps = TIME_STEP_LIST.copy()
+   
+        vtk_file, = [f for f in vtk_geo_files if ship_type in f] 
+        vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
 
-iotdb_entity = DB_API.Iotdb_Interface.iotdb_connect()
+        ''' Workload 2 '''
 
-tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+        print(f"\nship_type: {ship_type}")
 
-vtk_entity = DB_API.VTK_Interface.vtk_connect() # Load timestep vtk files
+        # ranges: NDArray[np.float64] = place_holder() # TODO: Generateing a range in the form of [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
 
-vtk_mesh = DB_API.VTK_Interface.vtk_connect # Load the geo structure of the ship
+        # COORD = ['X','Y','Z'] # Its just a macro
 
-time_steps = [200,400,...,1800]
+        # desired_attribute = place_holder() # TODO: Select a random attribute from [U,V,W,P,K,E], e.g., ['P']
 
-''' Workload 2 '''
+        # ''' W 2.1  Testing pg ... '''
+        print("\nTesting PostgreSQL Workload 2...")
+        if "_" in ship_type:
+            parts = ship_type.split("_")
+            pg_api.set_ship_type(parts[0])  # 设置船型
+            pg_api.set_ship_scale("_".join(parts[1:]))  # 设置规模
+        pg_api.set_zone_type("fluid") 
 
-ranges: NDArray[np.float64] = place_holder() # TODO: Generateing a range in the form of [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
+        pg_transaction = 0
+        start = time.time()
+        while time.time() - start < 60:
+            attribute_name = random.choice(VARIABLE_LIST)
 
-COORD = ['X','Y','Z'] # Its just a macro
+            # Generate a random range until we find some cells within the range
+            while True:
+                lower_bound, upper_bound = random_range(vtk_mesh)
+                cell_indexes = pg_api.range_query_coord(pg_entity, lower_bound, upper_bound)
+                if cell_indexes.size > 0:
+                    break
 
-desired_attribute = place_holder() # TODO: Select a random attribute from [U,V,W,P,K,E], e.g., ['P']
+            pg_result = []
 
-''' W 2.1  Testing pg ... '''
+            for time_step in valid_time_steps:
 
-cell_indexes = DB_API.PG_Interface.range_query(pg_entity, ranges, COORD)
+                pg_api.set_time_step(time_step)
 
-result = []
+                pg_vals = pg_api.point_query(pg_entity, cell_indexes, attribute_name)
+                pg_result.extend(pg_vals)
 
-for t in time_steps:
+            pg_aggvals = aggregation(pg_result)
+            pg_transaction += 1
+        print("PostgreSQL Workload 2 Test Completed.")
+        print(f"Total PostgreSQL Transactions in 60 seconds: {pg_transaction}")
 
-    pg_entity = DB_API.PG_Interface.pg_connect() # TODO: We are about to read a new timestep, adjust FROM clause accordingly.
+        ''' W 2.2  Testing iotdb ... '''
+        print("\nTesting IoTDB Workload 2...")
+        iotdb_api.set_ship_type(ship_type)
 
-    result.append(DB_API.PG_Interface.point_query(pg_entity, cell_indexes, desired_attribute))
+        iotdb_transaction = 0
+        start = time.time()
 
-aggregation(result)
+        while time.time() - start < 60:
+            attribute_name = random.choice(VARIABLE_LIST)
+            # Generate a random range until we find some cells within the range
+            while True:
+                lower_bound, upper_bound = random_range(vtk_mesh)
+                cell_indexes = iotdb_api.range_query_coord(iotdb_entity, lower_bound, upper_bound)
+                if cell_indexes.size > 0:
+                    break
 
-''' W 2.2  Testing iotdb ... '''
+            iotdb_result = []
 
-cell_indexes = DB_API.Iotdb_Interface.range_query(iotdb_entity, ranges, COORD)
+            for time_step in valid_time_steps:
 
-result = []
+                iotdb_api.set_time_step(time_step)
 
-for t in time_steps:
+                iotdb_vals = iotdb_api.point_query(iotdb_entity, cell_indexes, attribute_name)
+                iotdb_result.extend(iotdb_vals)
 
-    iotdb_entity = DB_API.PG_Interface.iotdb_connect() # TODO: We are about to read a new timestep, adjust FROM clause accordingly.
+            iotdb_aggvals = aggregation(iotdb_result)
 
-    result.append(DB_API.Iotdb_Interface.point_query(iotdb_entity, cell_indexes, desired_attribute))
+            iotdb_transaction += 1
+        print("IoTDB Workload 2 Test Completed.")
+        print(f"Total IoTDB Transactions in 60 seconds: {iotdb_transaction}")
 
-aggregation(result)
+        ''' W 2.3  Testing tiledb ... '''
 
-''' W 2.3  Testing tiledb ... '''
+        # cell_indexes = DB_API.Tiledb_Interface.range_query(tiledb_entity, ranges, COORD)
 
-cell_indexes = DB_API.Tiledb_Interface.range_query(tiledb_entity, ranges, COORD)
+        # result = []
 
-result = []
+        # for t in time_steps:
 
-for t in time_steps:
+        #     tiledb_entity = DB_API.PG_Interface.tiledb_connect() # TODO: We are about to read a new timestep, adjust FROM clause accordingly.
 
-    tiledb_entity = DB_API.PG_Interface.tiledb_connect() # TODO: We are about to read a new timestep, adjust FROM clause accordingly.
+        #     result.append(DB_API.Tiledb_Interface.point_query(tiledb_entity, cell_indexes, desired_attribute))
 
-    result.append(DB_API.Tiledb_Interface.point_query(tiledb_entity, cell_indexes, desired_attribute))
+        # aggregation(result)
 
-aggregation(result)
+        ''' W 2.4  Testing vtk as db ... '''
+        print("\nTesting VTK Workload 2...")
+        vtk_transaction = 0
+        start = time.time()
+        while time.time() - start < 60:
+            attribute_name = random.choice(VARIABLE_LIST)
 
-''' W 2.4  Testing vtk as db ... '''
+            while True:
+                lower_bound, upper_bound = random_range(vtk_mesh)
+                cell_indexes = vtk_api.range_query_coord(vtk_mesh, lower_bound, upper_bound)
+                if cell_indexes.size > 0:
+                    break
+    
+            vtk_result = []
 
-cell_indexes = DB_API.VTK_Interface.range_query(vtk_entity, ranges, COORD)
+            for time_step in valid_time_steps:
 
-result = []
+                vtk_query_file, = [f for f in vtk_query_files 
+                    if (ship_type in f) and f.endswith(f"_{time_step}.vtk")]
 
-for t in time_steps:
+                vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_QUERY_DIR, vtk_query_file))
 
-    vtk_entity = DB_API.PG_Interface.vtk_connect() # We are about to read a new timestep, adjust FROM clause accordingly.
+                vtk_vals = vtk_api.point_query(vtk_entity, cell_indexes, attribute_name)
 
-    result.append(DB_API.VTK_Interface.point_query(vtk_entity, cell_indexes, desired_attribute))
+                vtk_result.extend(vtk_vals)
 
-aggregation(result)
+            vtk_aggvals = aggregation(vtk_result)
+            vtk_transaction += 1
+        print("VTK Workload 2 Test Completed.")
+        print(f"Total VTK Transactions in 60 seconds: {vtk_transaction}")
+
+if __name__ == "__main__":
+    main()
+        
+
+        
