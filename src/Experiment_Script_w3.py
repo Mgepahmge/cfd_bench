@@ -1,5 +1,6 @@
 import DB_Interface_PG as DB_API
 import DB_Interface_IoTDB as IoTDB_API
+import TileDB_Interface as TDB_API
 import numpy as np
 from numpy.typing import NDArray
 import csv
@@ -7,6 +8,8 @@ import VTK_Interface as VTK_API
 import os
 import random
 import time
+import re
+from iotdb.utils.exception import StatementExecutionException
 
 # A function that represents various simple tasks that should be implemented based on the context
 def read_max_diffs_to_dict(delta_file_path):
@@ -31,6 +34,7 @@ def main():
     iotdb_entity = iotdb_api.iotdb_connect()
     
     # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+    tdb_api = TDB_API.TileDB_Interface()
 
     vtk_api = VTK_API.VTK_Interface()
 
@@ -41,10 +45,9 @@ def main():
     TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
     VARIABLE_LIST = ["U", "V", "W", "P", "K", "E"]
     VTK_MESH_DIR = "../vtk_dir/"
-    VTK_QUERY_DIR = "../vtk_db_dir/"
     MAX_RANGE_DIR = "../Max_Range/"
+    TileDB_DIR = "../TileDB_Instances/"
     vtk_geo_files = [f for f in os.listdir(VTK_MESH_DIR) if f.endswith(".vtk")]
-    vtk_query_files = [f for f in os.listdir(VTK_QUERY_DIR) if f.endswith(".vtk")]
     delta_files = [f for f in os.listdir(MAX_RANGE_DIR) if f.endswith(".csv")]
 
     for ship_type in SHIP_TYPE_LIST:
@@ -58,8 +61,7 @@ def main():
         
         iotdb_api.set_ship_type(ship_type)
 
-        vtk_file, = [f for f in vtk_geo_files if ship_type in f]
-        vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
+        ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
 
         for time_step in TIME_STEP_LIST:
 
@@ -71,9 +73,16 @@ def main():
             pg_api.set_time_step(time_step)
 
             iotdb_api.set_time_step(time_step)
+
+            tiledb_file, = [
+                    f for f in os.listdir(os.path.join(TileDB_DIR, ship_type)) 
+                    if re.match(rf"^{time_step}(?!\d).*fluid\.tdb$", f)
+                ]
+            tdb_entity = tdb_api.Load_TileDB_File(os.path.join(TileDB_DIR, ship_type, tiledb_file))
             
-            vtk_query_file, = [f for f in vtk_query_files 
+            vtk_query_file, = [f for f in vtk_geo_files 
                 if (ship_type in f) and f.endswith(f"_{time_step}.vtk")]
+            vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_query_file))
 
             delta_file, = [f for f in delta_files if ship_type in f
                            and f.endswith(f"_{time_step}_max_diffs.csv")]
@@ -115,30 +124,50 @@ def main():
             start_time = time.time()
             while time.time() - start_time < 60:  # Run for 60 seconds
 
-                attribute_name = random.choice(VARIABLE_LIST)
+                try:
 
-                delta = max_diffs_dict[attribute_name]
+                    attribute_name = random.choice(VARIABLE_LIST)
 
-                iotdb_iso_value, = iotdb_api.point_query(iotdb_entity,[random.randint(0, vtk_mesh.GetNumberOfCells()-1)], attribute_name)
-                
-                cell_indexes = iotdb_api.range_query_var(iotdb_entity, iotdb_iso_value -delta, iotdb_iso_value + delta, attribute_name)
+                    delta = max_diffs_dict[attribute_name]
 
-                iotdb_sub_mesh = VTK_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_mesh) 
+                    iotdb_iso_value, = iotdb_api.point_query(iotdb_entity,[random.randint(0, vtk_mesh.GetNumberOfCells()-1)], attribute_name)
+                    
+                    cell_indexes = iotdb_api.range_query_var(iotdb_entity, iotdb_iso_value -delta, iotdb_iso_value + delta, attribute_name)
 
-                iotdb_isosurface = VTK_API.VTK_Interface.vtk_isosurface_extraction(iotdb_sub_mesh, attribute_name, iotdb_iso_value)
+                    iotdb_sub_mesh = VTK_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_mesh) 
 
-                iotdb_transaction += 1
+                    iotdb_isosurface = VTK_API.VTK_Interface.vtk_isosurface_extraction(iotdb_sub_mesh, attribute_name, iotdb_iso_value)  
+
+                except StatementExecutionException as e:
+                    print(f"IoTDB Query 超时，跳过当前事务: {e}")
+                    continue  # Skip this iteration and continue with the next
+                else:
+                    iotdb_transaction += 1
 
             print(f"IoTDB Workload 3 completed {iotdb_transaction} transactions in 60 seconds.")
             print(f"Total IoTDB Transactions in 60 seconds: {iotdb_transaction}")
 
             ''' W 3.3  Testing tiledb ... '''
+            print("\nTesting TileDB Workload 3 at ship type:", ship_type, "time step:", time_step)
+            tiledb_transaction = 0
+            start_time = time.time()
+            while time.time() - start_time < 60:  # Run for 60 seconds
+                
+                attribute_name = random.choice(VARIABLE_LIST)
 
-            # cell_indexes = DB_API.Tiledb_Interface.range_query(tiledb_entity, [[ranges[0][0] - attribute_gap, ranges[0][1] + attribute_gap]], desired_attribute)
+                delta = max_diffs_dict[attribute_name]
 
-            # sub_mesh = DB_API.VTK_Interface.vtk_extract_submesh(vtk_entity, cell_indexes)
+                tiledb_iso_value, = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, attribute_name, [random.randint(0, vtk_mesh.GetNumberOfCells()-1)])
+                
+                cell_indexes = tdb_api.Attribute_Range_Query_TileDB(tdb_entity, attribute_name, tiledb_iso_value - delta, tiledb_iso_value + delta)
 
-            # DB_API.VTK_Interface.vtk_isosurface_extraction(sub_mesh)
+                tiledb_sub_mesh = VTK_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_mesh) 
+
+                tiledb_isosurface = VTK_API.VTK_Interface.vtk_isosurface_extraction(tiledb_sub_mesh, attribute_name, tiledb_iso_value)  
+
+                tiledb_transaction += 1
+            print(f"TileDB Workload 3 completed {tiledb_transaction} transactions in 60 seconds.")
+            print(f"Total TileDB Transactions in 60 seconds: {tiledb_transaction}")
 
             ''' W 3.4  Testing vtk as db ... '''
             print("\nTesting VTK Workload 3 at ship type:", ship_type, "time step:", time_step)
@@ -151,7 +180,7 @@ def main():
 
                 delta = max_diffs_dict[attribute_name]
 
-                vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_QUERY_DIR, vtk_query_file))
+                vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_MESH_DIR, vtk_query_file))
 
                 vtk_iso_value, = vtk_api.point_query(vtk_entity,[random.randint(0, vtk_mesh.GetNumberOfCells()-1)], attribute_name)
 

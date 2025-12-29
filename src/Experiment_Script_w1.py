@@ -1,5 +1,6 @@
 import DB_Interface_PG as PG_API
 import DB_Interface_IoTDB as IoTDB_API
+import TileDB_Interface as TDB_API
 import numpy as np
 from numpy.typing import NDArray
 from vtk import vtkUnstructuredGrid
@@ -7,6 +8,8 @@ import VTK_Interface as VTK_API
 import random
 import os
 import time
+import re
+from iotdb.utils.exception import StatementExecutionException
 
 # Functions that represent various simple tasks that should be implemented based on the context
 
@@ -57,7 +60,7 @@ def main():
     iotdb_api = IoTDB_API.Iotdb_Interface()
     iotdb_entity = iotdb_api.iotdb_connect()
 
-    # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+    tdb_api = TDB_API.TileDB_Interface()
 
     vtk_api = VTK_API.VTK_Interface()
     
@@ -67,7 +70,7 @@ def main():
     VARIABLE_LIST = ["U", "V", "W", "P", "K", "E"]
     VTK_MESH_DIR = "../vtk_dir/"
     vtk_files = [f for f in os.listdir(VTK_MESH_DIR) if f.endswith(".vtk")]
-    VTK_DB_DIR = "../vtk_db_dir/"
+    TileDB_DIR = "../TileDB_Instances/"
     
     for ship_type in SHIP_TYPE_LIST:
 
@@ -79,12 +82,9 @@ def main():
         pg_api.set_zone_type("fluid") 
 
         # tiledb_api.set_ship_type(ship_type)
+        ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
 
         iotdb_api.set_ship_type(ship_type)
-
-        #load VTK mesh corresponding to current zone
-        vtk_file, = [f for f in vtk_files if ship_type in f]
-        vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
         
         for time_step in TIME_STEP_LIST:
 
@@ -96,10 +96,16 @@ def main():
             pg_api.set_time_step(time_step)
             
             iotdb_api.set_time_step(time_step)
+
+            tiledb_file, = [
+                f for f in os.listdir(ship_tiledb_dir) 
+                if re.match(rf"^{time_step}(?!\d).*fluid\.tdb$", f)
+            ]
+            tdb_entity = tdb_api.Load_TileDB_File(os.path.join(ship_tiledb_dir, tiledb_file))
  
-            vtk_db_file_name = f"{ship_type}_GEO_{time_step}.vtk"
-            vtk_db_file_path = os.path.join(VTK_DB_DIR, vtk_db_file_name)
-            vtk_entity = vtk_api.vtk_connect(vtk_db_file_path)
+            vtk_file, = [f for f in vtk_files if (ship_type in f) and f.endswith(f"_{time_step}.vtk")]
+            vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
+            vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
  
             ''' Workload 1 '''
 
@@ -153,13 +159,29 @@ def main():
             print("IoTDB Point Intersection Query Test Completed.")
             print(f"Total IoTDB Point Transactions in 60 seconds: {iotdb_point_transaction}")
 
-            # ''' W 1.1.3 Testing tiledb ... '''
+            ''' W 1.1.3 Testing tiledb ... '''
+            print("\nTesting TileDB Point Intersection Query...")
+            start_time = time.time()
+            tiledb_point_transaction = 0
+            while time.time() - start_time < 60:  # Run for 60 second
+                
+                attribute_name = random.choice(VARIABLE_LIST)
 
-            # cell_indexes = DB_API.VTK_Interface.vtk_point_intersection(vtk_mesh, coordinates)
+                while True:
+                    coordinates = random_points(vtk_mesh) # TODO: Generate a list of valid coordinates as points    
 
-            # vals = DB_API.Tiledb_Interface.point_query(tiledb_entity, cell_indexes, attribute_names)
+                    cell_indexes = VTK_API.VTK_Interface().vtk_point_intersection(vtk_mesh, coordinates)
+                    if cell_indexes.size > 0:
+                        break
 
-            # result = aggregation(vals)
+                tiledb_point_vals = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, attribute_name, cell_indexes)
+
+                tiledb_point_result = aggregation(tiledb_point_vals)
+
+                tiledb_point_transaction += 1
+
+            print("TileDB Point Intersection Query Test Completed.")
+            print(f"Total TileDB Point Transactions in 60 seconds: {tiledb_point_transaction}")
 
             ''' W 1.1.4 Testing vtk (as db) ... '''
             print("\nTesting VTK Point Intersection Query...")
@@ -186,8 +208,7 @@ def main():
             print(f"Total VTK Point Transactions in 60 seconds: {vtk_point_transaction}")
 
 
-            ''' W 1.2 Range Query ''' 
-
+            ''' W 1.2 Line Intersection Query ''' 
             ''' W 1.2.1 Testing pg... '''
             print("\nTesting PG Line Intersection Query...")
             start_time = time.time()
@@ -237,12 +258,28 @@ def main():
             print(f"Total IoTDB Line Transactions in 60 seconds: {iotdb_line_transaction}")
 
             ''' W 1.2.3 Testing tiledb ... '''
+            print("\nTesting TileDB Line Intersection Query...")
+            start_time = time.time()
+            tiledb_line_transaction = 0
+            while time.time() - start_time < 60:  # Run for 60 second
+                
+                attribute_name = random.choice(VARIABLE_LIST)
 
-            # cell_indexes = DB_API.VTK_Interface.vtk_line_intersection(vtk_mesh, line_origin, line_direction)
+                while True:
+                    line_start, line_end = random_line(vtk_mesh) # TODO: #Generate a random line
 
-            # vals = DB_API.Tiledb_Interface.point_query(tiledb_entity, cell_indexes, attribute_names)
+                    cell_indexes = VTK_API.VTK_Interface().vtk_line_intersection(vtk_mesh, line_start, line_end)
+                    if cell_indexes.size > 0:
+                        break
 
-            # result = aggregation(vals)
+                tiledb_line_vals = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, attribute_name, cell_indexes)
+
+                tiledb_line_result = aggregation(tiledb_line_vals)
+
+                tiledb_line_transaction += 1
+
+            print("TileDB Line Intersection Query Test Completed.")
+            print(f"Total TileDB Line Transactions in 60 seconds: {tiledb_line_transaction}")
 
             ''' W 1.2.4 Testing vtk (as db) ... '''
             print("\nTesting VTK Line Intersection Query...")
@@ -268,16 +305,13 @@ def main():
             print("VTK Line Intersection Query Test Completed.")
             print(f"Total VTK Line Transactions in 60 seconds: {vtk_line_transaction}")
 
-            ''' W 1.3 Plane Query '''
-
-            # plane_origin, plane_direction = place_holder() # TODO: Generate a random line 
-
+            ''' W 1.3 Plane Intersection Query '''
             ''' W 1.3.1 Testing pg... '''
             print("\nTesting PG Plane Intersection Query...")
             start_time = time.time()
             pg_plane_transaction = 0
             while time.time() - start_time < 60:  # Run for 60 second                
-
+                
                 attribute_name = random.choice(VARIABLE_LIST)
 
                 while True:
@@ -296,16 +330,40 @@ def main():
             print("PG Plane Intersection Query Test Completed.")
             print(f"Total PG Plane Transactions in 60 seconds: {pg_plane_transaction}")
 
-            # cell_indexes = DB_API.VTK_Interface.vtk_plane_intersection(vtk_mesh, plane_origin, plane_direction)
-
-            # vals = DB_API.PG_Interface.point_query(pg_entity, cell_indexes, attribute_names)
-
-            # result = aggregation(vals)
-
             ''' W 1.3.2 Testing iotdb ... '''
             print("\nTesting IoTDB Plane Intersection Query...")
             start_time = time.time()
             iotdb_plane_transaction = 0
+            attempt_count = 0
+            while time.time() - start_time < 60:  # Run for 60 second
+                attempt_count += 1
+                try:    
+                    attribute_name = random.choice(VARIABLE_LIST)
+
+                    while True:
+                        plane_origin, plane_direction = random_plane(vtk_mesh) # TODO: Generate a random plane 
+
+                        cell_indexes = VTK_API.VTK_Interface().vtk_plane_intersection(vtk_mesh, plane_origin, plane_direction)
+                        if cell_indexes.size > 0:
+                            break
+
+                    iotdb_plane_vals = iotdb_api.point_query(iotdb_entity, cell_indexes, attribute_name)
+
+                    iotdb_plane_result = aggregation(iotdb_plane_vals)
+                except StatementExecutionException as e:
+                    print(f"第{attempt_count}次IoTDB Plane Query 超时，跳过当前事务: {e}")
+                    continue
+                else:
+                    iotdb_plane_transaction += 1
+                    print(f"第{attempt_count}次IoTDB Plane Query 事务成功完成")
+            
+            print("IoTDB Plane Intersection Query Test Completed.")
+            print(f"Total IoTDB Plane Transactions in 60 seconds: {iotdb_plane_transaction}")
+
+            ''' W 1.3.3 Testing tiledb ... '''
+            print("\nTesting TileDB Plane Intersection Query...")
+            start_time = time.time()
+            tiledb_plane_transaction = 0
             while time.time() - start_time < 60:  # Run for 60 second
                 
                 attribute_name = random.choice(VARIABLE_LIST)
@@ -317,22 +375,14 @@ def main():
                     if cell_indexes.size > 0:
                         break
 
-                iotdb_plane_vals = iotdb_api.point_query(iotdb_entity, cell_indexes, attribute_name)
+                tiledb_plane_vals = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, attribute_name, cell_indexes)
 
-                iotdb_plane_result = aggregation(iotdb_plane_vals)
+                tiledb_plane_result = aggregation(tiledb_plane_vals)
 
-                iotdb_plane_transaction += 1
-            
-            print("IoTDB Plane Intersection Query Test Completed.")
-            print(f"Total IoTDB Plane Transactions in 60 seconds: {iotdb_plane_transaction}")
+                tiledb_plane_transaction += 1
 
-            ''' W 1.3.3 Testing tiledb ... '''
-
-            # cell_indexes = DB_API.VTK_Interface.vtk_plane_intersection(vtk_mesh, plane_origin, plane_direction)
-
-            # vals = DB_API.Tiledb_Interface.point_query(tiledb_entity, cell_indexes, attribute_names)
-
-            # result = aggregation(vals)
+            print("TileDB Plane Intersection Query Test Completed.")
+            print(f"Total TileDB Plane Transactions in 60 seconds: {tiledb_plane_transaction}")
 
             ''' W 1.3.4 Testing vtk (as db) ... '''
             print("\nTesting VTK Plane Intersection Query...")

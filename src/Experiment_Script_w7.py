@@ -1,5 +1,6 @@
 import DB_Interface_PG as DB_API
 import DB_Interface_IoTDB as IoTDB_API
+import TileDB_Interface as TDB_API
 import numpy as np
 from numpy.typing import NDArray
 from vtk import vtkUnstructuredGrid ,vtkGradientFilter, vtkDataObject
@@ -7,6 +8,8 @@ import VTK_Interface as VTK_API
 import os
 import random
 import time
+import re
+from iotdb.utils.exception import StatementExecutionException
 
 def random_range(vtk_mesh:vtkUnstructuredGrid) -> NDArray[np.float64]:
     bounds = vtk_mesh.GetBounds()
@@ -42,26 +45,19 @@ def main():
     iotdb_entity = iotdb_api.iotdb_connect()
 
     # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+    tdb_api = TDB_API.TileDB_Interface()
 
     vtk_api = VTK_API.VTK_Interface()
-
 
     ''' Define ship types and time_step for query'''
     SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
     TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
-    VTK_MESH_DIR = "../vtk_dir/"
-    # VTK_QUERY_DIR = "../vtk_db_dir/"
-   
+    VTK_MESH_DIR = "../vtk_dir/"   
     vtk_geo_files = [f for f in os.listdir(VTK_MESH_DIR) if f.endswith(".vtk")]
-    # vtk_query_files = [f for f in os.listdir(VTK_QUERY_DIR) if f.endswith(".vtk")]
-    
-
+    TileDB_DIR = "../TileDB_Instances/"
 
     ''' Workload 7 '''
     for ship_type in SHIP_TYPE_LIST:
-
-        # vtk_file, = [f for f in vtk_geo_files if ship_type in f]
-        # vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
 
         for time_step in TIME_STEP_LIST:
 
@@ -108,28 +104,50 @@ def main():
             iotdb_transaction = 0
             start_time = time.time()
             while time.time() - start_time < 60:
-                while True:
-                    lower_bound, upper_bound = random_range(vtk_mesh)
-                    cell_indexes = iotdb_api.range_query_coord(iotdb_entity, lower_bound, upper_bound)
-                    if cell_indexes.size > 0:
-                        break
+                try:
+                    while True:
+                        lower_bound, upper_bound = random_range(vtk_mesh)
+                        cell_indexes = iotdb_api.range_query_coord(iotdb_entity, lower_bound, upper_bound)
+                        if cell_indexes.size > 0:
+                            break
+                    
+                    sub_mesh = VTK_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_mesh)
+
+                    iotdb_QCriterion = ComputeQCriterion(sub_mesh)
                 
-                sub_mesh = VTK_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_mesh)
-
-                iotdb_QCriterion = ComputeQCriterion(sub_mesh)
-
-                iotdb_transaction += 1
+                except StatementExecutionException as e:
+                    print("IoTDB StatementExecutionException:", e)
+                    continue  # Skip this iteration and try again
+                else:
+                    iotdb_transaction += 1
 
             print("IoTDB workload7 transactions for ship type:", ship_type, " at time step:", time_step, " is ", iotdb_transaction)
 
 
             ''' W 7.3  Testing tiledb ... '''
+            ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
+            tiledb_file, = [
+                f for f in os.listdir(ship_tiledb_dir) 
+                if re.match(rf"^{time_step}(?!\d).*fluid\.tdb$", f)
+            ]
+            tdb_entity = tdb_api.Load_TileDB_File(os.path.join(ship_tiledb_dir, tiledb_file))
 
-            # cell_indexes = DB_API.Tiledb_Interface.range_query(tiledb_entity, ranges, COORD)
+            print("\nTesting TileDB workload7 for ship type:", ship_type, " at time step:", time_step)
+            tiledb_transaction = 0
+            start_time = time.time()
+            while time.time() - start_time < 60:
+                while True:
+                    lower_bound, upper_bound = random_range(vtk_mesh)
+                    cell_indexes = tdb_api.Spatial_Range_Query_TileDB(tdb_entity, lower_bound, upper_bound)
+                    if cell_indexes.size > 0:
+                        break
+                
+                sub_mesh = VTK_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_mesh)
 
-            # sub_mesh = DB_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_entity)
+                tiledb_QCriterion = ComputeQCriterion(sub_mesh)
 
-            # DB_API.VTK_Interface.vtk_Q_criterion(sub_mesh)
+                tiledb_transaction += 1
+            print("TileDB workload7 transactions for ship type:", ship_type, " at time step:", time_step, " is ", tiledb_transaction)
 
             ''' W 7.4  Testing vtk as db ... '''
             print("\nTesting VTK workload7 for ship type:", ship_type, " at time step:", time_step)
@@ -149,13 +167,6 @@ def main():
                 vtk_transaction += 1
 
             print("VTK workload7 transactions for ship type:", ship_type, " at time step:", time_step, " is ", vtk_transaction)
-
-            # cell_indexes = DB_API.VTK_Interface.range_query(vtk_entity, ranges, COORD)
-
-            # sub_mesh = DB_API.VTK_Interface.vtk_extract_submesh(cell_indexes, vtk_entity)
-
-            # DB_API.VTK_Interface.vtk_Q_criterion(sub_mesh)
-
 
 if __name__ == "__main__":
     main()

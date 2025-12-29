@@ -1,11 +1,13 @@
 import DB_Interface_PG as DB_API
 import DB_Interface_IoTDB as IoTDB_API
+import TileDB_Interface as TDB_API
 import numpy as np
 from numpy.typing import NDArray
 import VTK_Interface as VTK_API
 import os
 import random
 import time
+import re
 
 # A function that represents various simple tasks that should be implemented based on the context
 def calculate_force(normals: NDArray[np.float64], pressures: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -29,6 +31,7 @@ def main():
     iotdb_entity = iotdb_api.iotdb_connect()
 
     # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+    tdb_api = TDB_API.TileDB_Interface()
 
     vtk_api = VTK_API.VTK_Interface()
 
@@ -37,8 +40,9 @@ def main():
     SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
     TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
 
-    VTK_QUERY_DIR = "../vtk_db_dir/"
+    VTK_QUERY_DIR = "../vtk_dir/"
     VTK_HULL_DIR = "../vtk_hull_dir/"
+    TileDB_DIR = "../TileDB_Instances/"
 
     vtk_query_files = [f for f in os.listdir(VTK_QUERY_DIR) if f.endswith(".vtk")]
     vtk_hull_files = [f for f in os.listdir(VTK_HULL_DIR) if f.endswith(".vtk")]
@@ -104,14 +108,25 @@ def main():
             print("IoTDB workload6 transactions for ship type:", ship_type, " at time step:", time_step, " is ", iotdb_transcation)
 
             ''' W 6.3  Testing tiledb ... '''
+            ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
+            tiledb_file, = [
+                f for f in os.listdir(ship_tiledb_dir) 
+                if re.match(rf"^{time_step}(?!\d).*hull\.tdb$", f)
+            ]
+            tdb_entity = tdb_api.Load_TileDB_File(os.path.join(ship_tiledb_dir, tiledb_file))
+            print("\nTesting TileDB workload6 for ship type:", ship_type, " at time step:", time_step)
+            tiledb_transaction = 0
+            start_time = time.time()
+            while time.time() - start_time < 60:
 
-            # norm_vectors = DB_API.VTK_Interface.vtk_surface_norm(vtk_mesh) # load the hull_zone and compute the norms of each element
+                tiledb_norm_vectors = VTK_API.VTK_Interface.vtk_surface_norm(vtk_hull_mesh) # load the hull_zone and compute the norms of each element
 
-            # pressures = DB_API.Tiledb_Interface.point_query(tiledb_entity, all_indexes, ['P']) # The purpose is to retrieve all pressure values, one can choose to implement in the most efficient way.
+                pressures = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, np.array(range(vtk_hull_mesh.GetNumberOfCells())), 'P') # The purpose is to retrieve all pressure values, one can choose to implement in the most efficient way.
 
-            # aggregated_force = norm_vectors * pressures
+                aggregated_force = calculate_force(tiledb_norm_vectors, pressures)
 
-            # print(aggregated_force[0])
+                tiledb_transaction += 1
+            print("TileDB workload6 transactions for ship type:", ship_type, " at time step:", time_step, " is ", tiledb_transaction)
 
             ''' W 6.4  Testing vtk as db ... '''
             

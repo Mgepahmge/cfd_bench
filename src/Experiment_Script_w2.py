@@ -1,5 +1,6 @@
 import DB_Interface_PG as PG_API
 import DB_Interface_IoTDB as IoTDB_API
+import TileDB_Interface as TDB_API
 import numpy as np
 from numpy.typing import NDArray
 import VTK_Interface as VTK_API
@@ -7,7 +8,7 @@ import random
 import os
 from vtk import vtkUnstructuredGrid
 import time
-
+import re
 
 # A function that represents various simple tasks that should be implemented based on the context
 def random_range(vtk_mesh:vtkUnstructuredGrid) -> NDArray[np.float64]:
@@ -39,18 +40,17 @@ def main():
     iotdb_entity = iotdb_api.iotdb_connect()
 
     # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+    tdb_api = TDB_API.TileDB_Interface()
 
     vtk_api = VTK_API.VTK_Interface()
-
 
     ''' Define ship types and time_step for query'''
     SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
     TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
     VARIABLE_LIST = ["U", "V", "W", "P", "K", "E"]
     VTK_MESH_DIR = "../vtk_dir/"
-    VTK_QUERY_DIR = "../vtk_db_dir/"
     vtk_geo_files = [f for f in os.listdir(VTK_MESH_DIR) if f.endswith(".vtk")]
-    vtk_query_files = [f for f in os.listdir(VTK_QUERY_DIR) if f.endswith(".vtk")]
+    TileDB_DIR = "../TileDB_Instances/"
 
     for ship_type in SHIP_TYPE_LIST:
 
@@ -59,19 +59,20 @@ def main():
             # print(f"{ship_type} 数据集没有 2000 时间步，使用: {valid_time_steps}")
         else:
             valid_time_steps = TIME_STEP_LIST.copy()
-   
-        vtk_file, = [f for f in vtk_geo_files if ship_type in f] 
+
+        # ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
+
+        vtk_file, = [f for f in vtk_geo_files if (ship_type in f) and f.endswith(f"_200.vtk")]
         vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
 
         ''' Workload 2 '''
-
-        print(f"\nship_type: {ship_type}")
-
         # ranges: NDArray[np.float64] = place_holder() # TODO: Generateing a range in the form of [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
 
         # COORD = ['X','Y','Z'] # Its just a macro
 
         # desired_attribute = place_holder() # TODO: Select a random attribute from [U,V,W,P,K,E], e.g., ['P']
+
+        print(f"\nship_type: {ship_type}")
 
         # ''' W 2.1  Testing pg ... '''
         print("\nTesting PostgreSQL Workload 2...")
@@ -139,18 +140,38 @@ def main():
         print(f"Total IoTDB Transactions in 60 seconds: {iotdb_transaction}")
 
         ''' W 2.3  Testing tiledb ... '''
+        ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
+        print("\nTesting TileDB Workload 2...")
+        tiledb_transaction = 0
+        start = time.time()
+        while time.time() - start < 60:
+            attribute_name = random.choice(VARIABLE_LIST)
 
-        # cell_indexes = DB_API.Tiledb_Interface.range_query(tiledb_entity, ranges, COORD)
+            # Generate a random range until we find some cells within the range
+            while True:
+                lower_bound, upper_bound = random_range(vtk_mesh)
+                cell_indexes = tdb_api.Spatial_Range_Query_TileDB(tdb_entity, lower_bound, upper_bound)
+                if cell_indexes.size > 0:
+                    break
 
-        # result = []
+            tiledb_result = []
 
-        # for t in time_steps:
+            for time_step in valid_time_steps:
 
-        #     tiledb_entity = DB_API.PG_Interface.tiledb_connect() # TODO: We are about to read a new timestep, adjust FROM clause accordingly.
+                tiledb_file, = [
+                    f for f in os.listdir(os.path.join(TileDB_DIR, ship_type)) 
+                    if re.match(rf"^{time_step}(?!\d).*fluid\.tdb$", f)
+                ]
+                tdb_entity = tdb_api.Load_TileDB_File(os.path.join(TileDB_DIR, ship_type, tiledb_file))
 
-        #     result.append(DB_API.Tiledb_Interface.point_query(tiledb_entity, cell_indexes, desired_attribute))
+                tiledb_vals = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, cell_indexes, attribute_name)
 
-        # aggregation(result)
+                tiledb_result.extend(tiledb_vals)
+
+            tiledb_aggvals = aggregation(tiledb_result)
+            tiledb_transaction += 1
+        print("TileDB Workload 2 Test Completed.")
+        print(f"Total TileDB Transactions in 60 seconds: {tiledb_transaction}")
 
         ''' W 2.4  Testing vtk as db ... '''
         print("\nTesting VTK Workload 2...")
@@ -169,10 +190,10 @@ def main():
 
             for time_step in valid_time_steps:
 
-                vtk_query_file, = [f for f in vtk_query_files 
+                vtk_query_file, = [f for f in vtk_geo_files 
                     if (ship_type in f) and f.endswith(f"_{time_step}.vtk")]
 
-                vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_QUERY_DIR, vtk_query_file))
+                vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_MESH_DIR, vtk_query_file))
 
                 vtk_vals = vtk_api.point_query(vtk_entity, cell_indexes, attribute_name)
 

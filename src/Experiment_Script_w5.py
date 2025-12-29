@@ -1,11 +1,13 @@
 import DB_Interface_PG as PG_API
 import DB_Interface_IoTDB as IoTDB_API
+import TileDB_Interface as TDB_API
 import numpy as np
 from numpy.typing import NDArray
 import VTK_Interface as VTK_API
 import os
 import random
 import time
+import re
 
 def random_start(vtk_mesh:VTK_API.vtkUnstructuredGrid):
     while True:
@@ -33,9 +35,9 @@ def main():
 
     iotdb_api = IoTDB_API.Iotdb_Interface()
     iotdb_entity = iotdb_api.iotdb_connect()
-    
 
     # tiledb_entity = DB_API.Tiledb_Interface.tiledb_connect()
+    tdb_api = TDB_API.TileDB_Interface()
 
     vtk_api = VTK_API.VTK_Interface()
 
@@ -45,10 +47,9 @@ def main():
     SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
     TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
     VTK_MESH_DIR = "../vtk_dir/"
-    VTK_QUERY_DIR = "../vtk_db_dir/"
+    TileDB_DIR = "../TileDB_Instances/"
 
     vtk_geo_files = [f for f in os.listdir(VTK_MESH_DIR) if f.endswith(".vtk")]
-    vtk_query_files = [f for f in os.listdir(VTK_QUERY_DIR) if f.endswith(".vtk")]
 
     ''' Workload 5 '''
     
@@ -68,7 +69,9 @@ def main():
 
         iotdb_api.set_ship_type(ship_type)
 
-        vtk_file, = [f for f in vtk_geo_files if ship_type in f]
+        ship_tiledb_dir = os.path.join(TileDB_DIR, ship_type)
+
+        vtk_file, = [f for f in vtk_geo_files if (ship_type in f) and f.endswith(f"_200.vtk")]
         vtk_mesh = VTK_API.VTK_Interface().vtk_connect(os.path.join(VTK_MESH_DIR, vtk_file))
 
         for time_step in valid_time_steps:
@@ -149,30 +152,44 @@ def main():
             print(f"Total IoTDB Transactions in 60 seconds: {iotdb_transaction}")
 
             ''' W 5.3  Testing tiledb ... '''
-
-            # coordinates = DB_API.Tiledb_Interface.point_query(tiledb_entity, initial_cell_indexes, COORD)
-
-            # trajectory = []
-
-            # _proceed = True
-
-            # while _proceed:
-
-            #     tmp_indexes = DB_API.VTK_Interface.vtk_point_intersection(coordinates)
-
-            #     if len(tmp_indexes == 0):
-            #         # No interesection found
-            #         _proceed = False
-
-            #         break
-
-            #     tmp_vel = DB_API.Tiledb_Interface.point_query(tiledb_entity, tmp_indexes, VELOCITY)
+            tiledb_file, = [
+                f for f in os.listdir(ship_tiledb_dir) 
+                if re.match(rf"^{time_step}(?!\d).*fluid\.tdb$", f)
+            ]
+            tdb_entity = tdb_api.Load_TileDB_File(os.path.join(ship_tiledb_dir, tiledb_file))
+            print("\nTesting TileDB Workload 5 at ship type:", ship_type, "time step:", time_step)
+            tiledb_transaction = 0
+            start_time = time.time()
+            while time.time() - start_time < 60:
                 
-            #     coordinates = coordinates + tmp_vel
+                tiledb_streamline = []
 
-            #     trajectory.append(coordinates)
+                current_cell_indexe, current_coordinate = random_start(vtk_mesh)
 
-            # print(trajectory)
+                tiledb_streamline.append(current_coordinate)
+
+                while True:
+
+                    u, = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, "U", current_cell_indexe)
+                    v, = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, "V", current_cell_indexe)
+                    w, = tdb_api.Point_Query_Attribute_TileDB(tdb_entity, "W", current_cell_indexe)
+
+                    velocity = np.array([u, v, w], dtype=np.float64)
+
+                    next_coordinate = cal_next_point(current_coordinate, velocity, delta_t=1.0)
+
+                    next_cell_indexe = vtk_api.vtk_point_intersection(vtk_mesh, [next_coordinate])
+
+                    if next_cell_indexe.size == 0:
+                        break
+
+                    tiledb_streamline.append(next_coordinate)
+                    current_cell_indexe = next_cell_indexe
+                    current_coordinate = next_coordinate
+
+                tiledb_transaction += 1
+            print("TileDB Workload 5 Test at ship type", ship_type, "time step", time_step, "Completed.")
+            print(f"Total TileDB Transactions in 60 seconds: {tiledb_transaction}")
 
             ''' W 5.4  Testing vtk as db ... '''
             print("\nTesting VTK Workload 5 at ship type:", ship_type, "time step:", time_step)
@@ -190,7 +207,7 @@ def main():
 
                 while True:
 
-                    vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_QUERY_DIR, vtk_query_file))
+                    vtk_entity = vtk_api.vtk_connect(os.path.join(VTK_MESH_DIR, vtk_query_file))
 
                     u, = vtk_api.point_query(vtk_entity, current_cell_indexe, "U")
                     v, = vtk_api.point_query(vtk_entity, current_cell_indexe, "V")
