@@ -1,39 +1,16 @@
-# BenchMark
+# CFD-Bench
 
-#### 介绍
-{**以下是 Gitee 平台说明，您可以替换此简介**
-Gitee 是 OSCHINA 推出的基于 Git 的代码托管平台（同时支持 SVN）。专为开发者提供稳定、高效、安全的云端软件开发协作平台
-无论是个人、团队、或是企业，都能够用 Gitee 实现代码托管、项目管理、协作开发。企业项目请看 [https://gitee.com/enterprises](https://gitee.com/enterprises)}
-
-#### 软件架构
-软件架构说明
+#### INTRODUCTION
+This is the source code of our submitted paper to VLDB 2026 "CFD-Bench: A CFD-driven Benchmark for Scientific Data Processing Using Database Approaches". It contains 8 workloads simulating 8 different CFD tasks on databases as a benchmark test.
 
 
-#### 安装教程
+#### HOW TO USE
+1. Before running the benchmark, a user must download a package of CFD data from CFD Lifecycle Dataset (https://www.scidb.cn/en/detail?dataSetId=3553563d222d41998d7ccdd2ceff1bf9). A .zip package has three subfolders, the files in the "postprocessing" folder, i.e., the .dat files are the raw data set.
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+2. Execute the "Load_dataset.py" script (TODO) to decode the .dat files and load them into different database systems. The principle of the loading process is as follows:
+2.1 A .dat file is a standard CFD post-processing data format, used in softwares such as Tecplot. The first objective of data loading is to decode the .dat file, extracting its geometry topology and cell values. This process is done using the "Dat_data_decoder.py" script.
+2.2 Due to the inability of current DBMS on handling geometrical operations, the geometry info is stored and managed using a VTK file. The cell values are organized into multidimensional array, managed by various database systems.
+2.3 For the details of data modelling, please refer to our paper, Section "5. Evaluation".
 
-#### 使用说明
+3. Execute "Experiment_Script_w1.py" to "Experiment_Script_w8.py" to perform the benchmark test using the corresponding workload.
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 参与贡献
-
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
-
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
