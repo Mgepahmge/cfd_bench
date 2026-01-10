@@ -21,7 +21,7 @@ class PG_Interface:
         self.db_entity = None
 
     @staticmethod
-    def pg_connect(db_name="cae_data2", db_user="postgres", db_password="123456", db_host="localhost", db_port="5432"):
+    def pg_connect(db_name="cae_data", db_user="postgres", db_password="123456", db_host="localhost", db_port="5432"):
         """
         连接到 PostgreSQL 数据库
         """
