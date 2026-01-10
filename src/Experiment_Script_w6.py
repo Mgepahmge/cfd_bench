@@ -19,7 +19,7 @@ def calculate_force(normals: NDArray[np.float64], pressures: NDArray[np.float64]
         total_force += force
     return total_force
 
-def main():
+def main(ship_types=None):
 
     ''' Pre-processing '''
 
@@ -37,7 +37,10 @@ def main():
 
 
     ''' Define ship types and time_step for query'''
-    SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
+    if ship_types is None:
+        SHIP_TYPE_LIST = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
+    else:
+        SHIP_TYPE_LIST = ship_types
     TIME_STEP_LIST = ["200", "400", "600", "800", "1000", "1200", "1400", "1600", "1800", "2000"]
 
     VTK_QUERY_DIR = "../vtk_dir/"
