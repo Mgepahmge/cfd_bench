@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.tmp_iotdb_smoke/
+
+# Large local datasets / caches (do not commit)
+vtk_dir/
+data/
+TileDB_Instances/
+
+# Generated outputs (regenerable)
+output/
+
+# Benchmark run logs (regenerable)
+src/iotdb_test/*.log
