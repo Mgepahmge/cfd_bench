@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cfd_bench"
+version = "0.2.0"
+description = "CFD-Bench: scientific data processing benchmark for IoTDB, PostgreSQL, TileDB"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "pandas",
+]
+
+[project.optional-dependencies]
+iotdb = ["apache-iotdb"]
+postgresql = ["psycopg2-binary"]
+tiledb = ["tiledb"]
+vtk = ["vtk"]
+all = ["apache-iotdb", "psycopg2-binary", "tiledb", "vtk"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

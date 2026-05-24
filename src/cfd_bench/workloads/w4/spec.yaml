@@ -1,0 +1,8 @@
+name: w4
+description: Workload W4 — unified API implementation
+backends:
+  - postgresql
+  - iotdb
+  - tiledb
+  - vtk
+allow_vtk_baseline: true

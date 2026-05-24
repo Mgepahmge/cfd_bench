@@ -1,0 +1,11 @@
+name: w1
+description: Point/line/plane intersection + scalar query
+required_caps:
+  - mesh_static
+  - cell_vars
+backends:
+  - postgresql
+  - iotdb
+  - tiledb
+  - vtk
+allow_vtk_baseline: true

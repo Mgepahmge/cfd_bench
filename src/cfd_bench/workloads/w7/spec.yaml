@@ -1,0 +1,8 @@
+name: w7
+description: Workload W7 — unified API implementation
+backends:
+  - postgresql
+  - iotdb
+  - tiledb
+  - vtk
+allow_vtk_baseline: true

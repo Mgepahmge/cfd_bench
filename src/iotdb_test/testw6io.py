@@ -1,5 +1,5 @@
 ## import DB_Interface_PG as DB_API  # IoTDB-only mode
-import DB_Interface_IoTDB as IoTDB_API
+from cfd_bench.infra.iotdb import legacy_variables_client as IoTDB_API
 ## import TileDB_Interface as TDB_API  # IoTDB-only mode
 import numpy as np
 from numpy.typing import NDArray
