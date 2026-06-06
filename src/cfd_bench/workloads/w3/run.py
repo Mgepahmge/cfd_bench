@@ -11,7 +11,9 @@ import time
 import numpy as np
 
 from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
+from cfd_bench.workloads.common.geom_resolver import cell_count, make_geom_client
 
 
 def read_max_diffs(path: str) -> dict:
@@ -51,12 +53,10 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         return
     max_diffs = read_max_diffs(delta_file)
 
-    geom = make_vtk(cfg.vtk_dir, ship, step)
-    n_cells = geom.vtk_mesh.GetNumberOfCells()
-
     if "postgresql" in backends:
-        pg = make_pg(ship, "fluid")
-        pg.set_step(step)
+        pg = make_pg(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
+        n_cells = cell_count(geom)
         _bench(
             "PG",
             lambda c, v: pg.point_query(c, v),
@@ -70,13 +70,15 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step)
+        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+        n_cells = cell_count(geom)
         _bench(
             "IoTDB",
             lambda c, v: iotdb.point_query(c, v),
             lambda lo, hi, v: iotdb.range_query_var(lo, hi, v),
-            lambda cells: iotdb.extract_submesh(cells),
-            lambda mesh, v, val: iotdb.isosurface_extraction(v, val),
+            lambda cells: geom.extract_submesh(cells),
+            lambda mesh, v, val: geom.isosurface_extraction(v, val),
             n_cells,
             max_diffs,
             cfg.duration_sec,
@@ -84,13 +86,15 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root)
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+        n_cells = cell_count(geom)
         _bench(
             "TileDB",
             lambda c, v: tiledb.point_query(c, v),
             lambda lo, hi, v: tiledb.range_query_var(lo, hi, v),
-            lambda cells: tiledb.extract_submesh(cells),
-            lambda mesh, v, val: tiledb.isosurface_extraction(v, val),
+            lambda cells: geom.extract_submesh(cells),
+            lambda mesh, v, val: geom.isosurface_extraction(v, val),
             n_cells,
             max_diffs,
             cfg.duration_sec,
@@ -98,35 +102,26 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         tiledb.close()
 
     if "vtk" in backends:
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+        n_cells = cell_count(vtk)
         _bench(
             "VTK",
-            lambda c, v: geom.point_query(c, v),
-            lambda lo, hi, v: geom.range_query_var(lo, hi, v),
-            lambda cells: geom.extract_submesh(cells),
-            lambda mesh, v, val: geom.isosurface_extraction(v, val),
+            lambda c, v: vtk.point_query(c, v),
+            lambda lo, hi, v: vtk.range_query_var(lo, hi, v),
+            lambda cells: vtk.extract_submesh(cells),
+            lambda mesh, v, val: vtk.isosurface_extraction(v, val),
             n_cells,
             max_diffs,
             cfg.duration_sec,
         )
+        vtk.close()
 
 
 def main(ships=None):
     ap = argparse.ArgumentParser(description="W3: isosurface from variable range")
-    ap.add_argument("--ships", nargs="+", default=None)
-    ap.add_argument("--duration", type=float, default=60.0)
-    ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
-    ap.add_argument("--max-range-dir", default="../Max_Range")
+    add_common_workload_args(ap)
     args = ap.parse_args()
-
-    cfg = WorkloadConfig(
-        ships=args.ships or ships or WorkloadConfig().ships,
-        duration_sec=args.duration,
-        vtk_dir=args.vtk_dir,
-        tiledb_root=args.tiledb_root,
-        max_range_dir=args.max_range_dir,
-    )
+    cfg = workload_config_from_args(args, ships=ships)
     for ship in cfg.ships:
         for step in cfg.valid_steps(ship):
             if cfg.skip_step(ship, step):

@@ -8,8 +8,10 @@ import time
 
 import numpy as np
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk, mesh_bounds_from_client
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
+from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import aggregation_w2
 from cfd_bench.workloads.common.random_geom import random_coord_range
 
@@ -34,67 +36,71 @@ def _bench(label, coord_fn, scalar_fn, bounds, steps, duration):
 
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
     steps = cfg.valid_steps(ship)
-    geom = make_vtk(cfg.vtk_dir, ship, 200)
-    bounds = mesh_bounds_from_client(geom)
-    if bounds is None:
-        return
+    shared_bounds = None
+    ref_step = steps[0]
 
     if "postgresql" in backends:
-        pg = make_pg(ship, "fluid")
+        pg = make_pg(ship, ref_step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, ref_step, pg, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, ref_step, pg, geom, cfg.zone_fluid)
+        if bounds:
 
-        def pg_scalar(cells, var, step):
-            pg.set_step(step)
-            return pg.point_query(cells, var).tolist()
+            def pg_scalar(cells, var, step):
+                pg.ctx.step = int(step)
+                pg._sync_timestep(int(step))
+                return pg.point_query(cells, var).tolist()
 
-        _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec)
+            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec)
+            shared_bounds = bounds
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, steps[0])
-        db_bounds = mesh_bounds_from_client(iotdb) or bounds
+        iotdb = make_iotdb(ship, ref_step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, ref_step, iotdb, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, ref_step, iotdb, geom, cfg.zone_fluid) or shared_bounds
+        if bounds:
 
-        def iot_scalar(cells, var, step):
-            iotdb.ctx.step = step
-            return iotdb.point_query(cells, var).tolist()
+            def iot_scalar(cells, var, step):
+                iotdb.ctx.step = step
+                return iotdb.point_query(cells, var).tolist()
 
-        _bench("IoTDB", lambda lo, hi: iotdb.range_query_coord(lo, hi), iot_scalar, db_bounds, steps, cfg.duration_sec)
+            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec)
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, steps[0], cfg.tiledb_root)
-        db_bounds = mesh_bounds_from_client(tiledb) or bounds
+        tiledb = make_tiledb(ship, ref_step, cfg.tiledb_root, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, ref_step, tiledb, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, ref_step, tiledb, geom, cfg.zone_fluid) or shared_bounds
+        if bounds:
 
-        def tdb_scalar(cells, var, step):
-            tiledb.ctx.step = step
-            return tiledb.point_query(cells, var).tolist()
+            def tdb_scalar(cells, var, step):
+                tiledb.ctx.step = step
+                return tiledb.point_query(cells, var).tolist()
 
-        _bench("TileDB", lambda lo, hi: tiledb.range_query_coord(lo, hi), tdb_scalar, db_bounds, steps, cfg.duration_sec)
+            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec)
         tiledb.close()
 
     if "vtk" in backends:
+        vtk = make_vtk(cfg.vtk_dir, ship, ref_step, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, ref_step, vtk, vtk, cfg.zone_fluid) or shared_bounds
+        if bounds:
 
-        def vtk_scalar(cells, var, step):
-            vtk = make_vtk(cfg.vtk_dir, ship, step)
-            return vtk.point_query(cells, var).tolist()
+            def vtk_scalar(cells, var, step):
+                v = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+                try:
+                    return v.point_query(cells, var).tolist()
+                finally:
+                    v.close()
 
-        _bench("VTK", lambda lo, hi: geom.range_query_coord(lo, hi), vtk_scalar, bounds, steps, cfg.duration_sec)
+            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec)
+        vtk.close()
 
 
 def main(ships=None):
     ap = argparse.ArgumentParser(description="W2: coord range + multi-step query")
-    ap.add_argument("--ships", nargs="+", default=None)
-    ap.add_argument("--duration", type=float, default=60.0)
-    ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
+    add_common_workload_args(ap)
     args = ap.parse_args()
-
-    cfg = WorkloadConfig(
-        ships=args.ships or ships or WorkloadConfig().ships,
-        duration_sec=args.duration,
-        vtk_dir=args.vtk_dir,
-        tiledb_root=args.tiledb_root,
-    )
+    cfg = workload_config_from_args(args, ships=ships)
     for ship in cfg.ships:
         print(f"\n=== W2 ship={ship} ===")
         run_ship(cfg, ship, set(args.backend))

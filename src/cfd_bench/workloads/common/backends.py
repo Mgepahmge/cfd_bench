@@ -9,7 +9,6 @@ from cfd_bench.API.iotdb_api import IoTDBMeshClient
 from cfd_bench.API.tiledb_api import TileDBMeshClient
 from cfd_bench.API.vtk_api import VTKMeshClient
 from cfd_bench.infra.tiledb.config import TileDBConfig
-from cfd_bench.workloads.common.pg_cae_client import CaeSimulationPGClient
 from cfd_bench.workloads.common.vtk_files import resolve_vtk_file
 
 
@@ -32,9 +31,12 @@ def make_tiledb(ship: str, step: int, root: str, zone: str = "0_Fluid") -> TileD
     return client
 
 
-def make_pg(ship: str, zone_type: str = "fluid") -> CaeSimulationPGClient:
-    s, scale = parse_ship(ship)
-    return CaeSimulationPGClient(ship=s, scale=scale, zone_type=zone_type)
+def make_pg(ship: str, step: int = 200, zone: str = "0_Fluid"):
+    from cfd_bench.API.postgresql_api.client import PostgreSQLMeshClient
+
+    client = PostgreSQLMeshClient()
+    client.connect(ship, step, zone=zone)
+    return client
 
 
 def make_vtk(vtk_dir: str, ship: str, step: int, zone: str = "0_Fluid") -> VTKMeshClient:
@@ -48,12 +50,31 @@ def make_vtk(vtk_dir: str, ship: str, step: int, zone: str = "0_Fluid") -> VTKMe
 
 
 def mesh_bounds_from_client(client) -> Optional[list]:
-    if hasattr(client, "runtime"):
-        data = client.runtime.ensure_cells(client.ctx.dataset_key, client.ctx.zone)
-        from cfd_bench.workloads.common.bounds import bbox_from_cell_bboxes, flat_bounds
+    if hasattr(client, "runtime") and client.runtime is not None and hasattr(client, "ctx") and client.ctx is not None:
+        try:
+            data = client.runtime.ensure_cells(client.ctx.dataset_key, client.ctx.zone)
+            from cfd_bench.workloads.common.bounds import bbox_from_cell_bboxes, flat_bounds
 
-        gmin, gmax = bbox_from_cell_bboxes(data.cell_bbox)
-        return flat_bounds(gmin, gmax)
+            gmin, gmax = bbox_from_cell_bboxes(data.cell_bbox)
+            return flat_bounds(gmin, gmax)
+        except TypeError:
+            try:
+                data = client.runtime.ensure_cells()
+                from cfd_bench.workloads.common.bounds import bbox_from_cell_bboxes, flat_bounds
+
+                gmin, gmax = bbox_from_cell_bboxes(data.cell_bbox)
+                return flat_bounds(gmin, gmax)
+            except Exception:
+                pass
+    if hasattr(client, "get_cell_count"):
+        from cfd_bench.infra.postgresql import spatial as pg_spatial
+
+        if hasattr(client, "_inner") and client._inner is not None and client._key is not None:
+            b = pg_spatial.fetch_mesh_bounds(
+                client._inner.conn, client._key.ship, client._key.scale, client._key.zone
+            )
+            if b:
+                return b
     if hasattr(client, "vtk_mesh") and client.vtk_mesh is not None:
         b = client.vtk_mesh.GetBounds()
         return [b[0], b[1], b[2], b[3], b[4], b[5]]

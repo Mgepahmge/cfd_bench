@@ -7,8 +7,10 @@ import time
 
 import numpy as np
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk, mesh_bounds_from_client
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
+from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import cal_next_point
 from cfd_bench.workloads.common.random_geom import random_start_point
 
@@ -18,7 +20,6 @@ def _streamline(label, scalar_fn, intersect_fn, bounds, duration, delta_t=1.0):
     t0 = time.time()
     while time.time() - t0 < duration:
         cid, coord = random_start_point(intersect_fn, bounds)
-        line = [coord]
         cur_cid, cur_coord = cid, coord
         while True:
             u, v, w = scalar_fn(cur_cid)
@@ -29,85 +30,83 @@ def _streamline(label, scalar_fn, intersect_fn, bounds, duration, delta_t=1.0):
                 break
             cur_cid = int(nxt_cells[0])
             cur_coord = nxt
-            line.append(nxt)
         txn += 1
     print(f"{label} W5: {txn} txns in {duration}s")
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
-    geom = make_vtk(cfg.vtk_dir, ship, 200)
-    bounds = mesh_bounds_from_client(geom)
-    if bounds is None:
-        return
+    shared_bounds = None
 
     if "postgresql" in backends:
-        pg = make_pg(ship, "fluid")
-        pg.set_step(step)
+        pg = make_pg(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, pg, geom, cfg.zone_fluid)
+        if bounds:
 
-        def pg_scalar(cid):
-            return (
-                float(pg.point_query([cid], "U")[0]),
-                float(pg.point_query([cid], "V")[0]),
-                float(pg.point_query([cid], "W")[0]),
-            )
+            def pg_scalar(cid):
+                return (
+                    float(pg.point_query([cid], "U")[0]),
+                    float(pg.point_query([cid], "V")[0]),
+                    float(pg.point_query([cid], "W")[0]),
+                )
 
-        _streamline("PG", pg_scalar, geom.point_intersection, bounds, cfg.duration_sec)
+            _streamline("PG", pg_scalar, geom.point_intersection, bounds, cfg.duration_sec)
+            shared_bounds = bounds
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step)
+        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, iotdb, geom, cfg.zone_fluid) or shared_bounds
+        if bounds:
 
-        def iot_scalar(cid):
-            return (
-                float(iotdb.point_query([cid], "U")[0]),
-                float(iotdb.point_query([cid], "V")[0]),
-                float(iotdb.point_query([cid], "W")[0]),
-            )
+            def iot_scalar(cid):
+                return (
+                    float(iotdb.point_query([cid], "U")[0]),
+                    float(iotdb.point_query([cid], "V")[0]),
+                    float(iotdb.point_query([cid], "W")[0]),
+                )
 
-        _streamline("IoTDB", iot_scalar, iotdb.point_intersection, bounds, cfg.duration_sec)
+            _streamline("IoTDB", iot_scalar, geom.point_intersection, bounds, cfg.duration_sec)
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root)
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, tiledb, geom, cfg.zone_fluid) or shared_bounds
+        if bounds:
 
-        def tdb_scalar(cid):
-            return (
-                float(tiledb.point_query([cid], "U")[0]),
-                float(tiledb.point_query([cid], "V")[0]),
-                float(tiledb.point_query([cid], "W")[0]),
-            )
+            def tdb_scalar(cid):
+                return (
+                    float(tiledb.point_query([cid], "U")[0]),
+                    float(tiledb.point_query([cid], "V")[0]),
+                    float(tiledb.point_query([cid], "W")[0]),
+                )
 
-        _streamline("TileDB", tdb_scalar, tiledb.point_intersection, bounds, cfg.duration_sec)
+            _streamline("TileDB", tdb_scalar, geom.point_intersection, bounds, cfg.duration_sec)
         tiledb.close()
 
     if "vtk" in backends:
-        vtk = make_vtk(cfg.vtk_dir, ship, step)
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.zone_fluid) or shared_bounds
+        if bounds:
 
-        def vtk_scalar(cid):
-            return (
-                float(vtk.point_query([cid], "U")[0]),
-                float(vtk.point_query([cid], "V")[0]),
-                float(vtk.point_query([cid], "W")[0]),
-            )
+            def vtk_scalar(cid):
+                return (
+                    float(vtk.point_query([cid], "U")[0]),
+                    float(vtk.point_query([cid], "V")[0]),
+                    float(vtk.point_query([cid], "W")[0]),
+                )
 
-        _streamline("VTK", vtk_scalar, vtk.point_intersection, bounds, cfg.duration_sec)
+            _streamline("VTK", vtk_scalar, vtk.point_intersection, bounds, cfg.duration_sec)
+        vtk.close()
 
 
 def main(ships=None):
     ap = argparse.ArgumentParser(description="W5: streamline integration")
-    ap.add_argument("--ships", nargs="+", default=None)
-    ap.add_argument("--duration", type=float, default=60.0)
-    ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
+    add_common_workload_args(ap)
     args = ap.parse_args()
-
-    cfg = WorkloadConfig(
-        ships=args.ships or ships or WorkloadConfig().ships,
-        duration_sec=args.duration,
-        vtk_dir=args.vtk_dir,
-        tiledb_root=args.tiledb_root,
-    )
+    cfg = workload_config_from_args(args, ships=ships)
     for ship in cfg.ships:
         for step in cfg.valid_steps(ship):
             if cfg.skip_step(ship, step):

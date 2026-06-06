@@ -8,8 +8,10 @@ import time
 
 import numpy as np
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk, mesh_bounds_from_client
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
+from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import aggregation
 from cfd_bench.workloads.common.random_geom import (
     random_line_in_bbox,
@@ -68,74 +70,78 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
             print(f"skip {ship} step {step}")
             continue
         print(f"\n=== W1 ship={ship} step={step} ===")
-        geom = make_vtk(cfg.vtk_dir, ship, step)
-        bounds = mesh_bounds_from_client(geom)
-        if bounds is None:
-            print("no bounds, skip")
-            continue
+        shared_bounds = None
 
         if "postgresql" in backends:
-            pg = make_pg(ship, "fluid")
-            pg.set_step(step)
+            pg = make_pg(ship, step, zone=cfg.zone_fluid)
+            geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
+            bounds = mesh_bounds(cfg, ship, step, pg, geom, cfg.zone_fluid)
+            if bounds is None:
+                print("PG: no bounds, skip")
+            else:
+                shared_bounds = shared_bounds or bounds
 
-            def pg_scalar(cells, var):
-                return pg.point_query(cells, var)
+                def pg_scalar(cells, var):
+                    return pg.point_query(cells, var)
 
-            _run_point_queries("PG", lambda p: geom.point_intersection(p), pg_scalar, bounds, cfg.duration_sec)
-            _run_line_queries("PG", geom.line_intersection, pg_scalar, bounds, cfg.duration_sec)
-            _run_plane_queries("PG", geom.plane_intersection, pg_scalar, bounds, cfg.duration_sec)
+                _run_point_queries("PG", geom.point_intersection, pg_scalar, bounds, cfg.duration_sec)
+                _run_line_queries("PG", geom.line_intersection, pg_scalar, bounds, cfg.duration_sec)
+                _run_plane_queries("PG", geom.plane_intersection, pg_scalar, bounds, cfg.duration_sec)
             pg.close()
 
         if "iotdb" in backends:
-            iotdb = make_iotdb(ship, step)
-            db_bounds = mesh_bounds_from_client(iotdb) or bounds
+            iotdb = make_iotdb(ship, step, cfg.zone_fluid)
+            geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+            bounds = mesh_bounds(cfg, ship, step, iotdb, geom, cfg.zone_fluid) or shared_bounds
+            if bounds is None:
+                print("IoTDB: no bounds, skip")
+            else:
 
-            def iotdb_scalar(cells, var):
-                return iotdb.point_query(cells, var)
+                def iotdb_scalar(cells, var):
+                    return iotdb.point_query(cells, var)
 
-            _run_point_queries("IoTDB", iotdb.point_intersection, iotdb_scalar, db_bounds, cfg.duration_sec)
-            _run_line_queries("IoTDB", iotdb.line_intersection, iotdb_scalar, db_bounds, cfg.duration_sec)
-            _run_plane_queries("IoTDB", iotdb.plane_intersection, iotdb_scalar, db_bounds, cfg.duration_sec)
+                _run_point_queries("IoTDB", geom.point_intersection, iotdb_scalar, bounds, cfg.duration_sec)
+                _run_line_queries("IoTDB", geom.line_intersection, iotdb_scalar, bounds, cfg.duration_sec)
+                _run_plane_queries("IoTDB", geom.plane_intersection, iotdb_scalar, bounds, cfg.duration_sec)
             iotdb.close()
 
         if "tiledb" in backends:
-            tiledb = make_tiledb(ship, step, cfg.tiledb_root)
-            db_bounds = mesh_bounds_from_client(tiledb) or bounds
+            tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
+            geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+            bounds = mesh_bounds(cfg, ship, step, tiledb, geom, cfg.zone_fluid) or shared_bounds
+            if bounds is None:
+                print("TileDB: no bounds, skip")
+            else:
 
-            def tdb_scalar(cells, var):
-                return tiledb.point_query(cells, var)
+                def tdb_scalar(cells, var):
+                    return tiledb.point_query(cells, var)
 
-            _run_point_queries("TileDB", tiledb.point_intersection, tdb_scalar, db_bounds, cfg.duration_sec)
-            _run_line_queries("TileDB", tiledb.line_intersection, tdb_scalar, db_bounds, cfg.duration_sec)
-            _run_plane_queries("TileDB", tiledb.plane_intersection, tdb_scalar, db_bounds, cfg.duration_sec)
+                _run_point_queries("TileDB", geom.point_intersection, tdb_scalar, bounds, cfg.duration_sec)
+                _run_line_queries("TileDB", geom.line_intersection, tdb_scalar, bounds, cfg.duration_sec)
+                _run_plane_queries("TileDB", geom.plane_intersection, tdb_scalar, bounds, cfg.duration_sec)
             tiledb.close()
 
         if "vtk" in backends:
-            vtk = make_vtk(cfg.vtk_dir, ship, step)
+            vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+            bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.zone_fluid) or shared_bounds
+            if bounds is None:
+                print("VTK: no bounds, skip")
+            else:
 
-            def vtk_scalar(cells, var):
-                return vtk.point_query(cells, var)
+                def vtk_scalar(cells, var):
+                    return vtk.point_query(cells, var)
 
-            _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec)
-            _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec)
-            _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec)
+                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec)
+                _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec)
+                _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec)
+            vtk.close()
 
 
 def main(ships=None):
     ap = argparse.ArgumentParser(description="W1: intersection + point query")
-    ap.add_argument("--ships", nargs="+", default=None)
-    ap.add_argument("--duration", type=float, default=60.0)
-    ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
+    add_common_workload_args(ap)
     args = ap.parse_args()
-
-    cfg = WorkloadConfig(
-        ships=args.ships or ships or WorkloadConfig().ships,
-        duration_sec=args.duration,
-        vtk_dir=args.vtk_dir,
-        tiledb_root=args.tiledb_root,
-    )
+    cfg = workload_config_from_args(args, ships=ships)
     backends = set(args.backend)
     for ship in cfg.ships:
         run_ship(cfg, ship, backends)

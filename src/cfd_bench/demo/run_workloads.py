@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import importlib
 
+from cfd_bench.core.paths import resolve_tiledb_root, resolve_vtk_dir, resolve_vtk_hull_dir
+
 
 def main():
     ap = argparse.ArgumentParser(description="Run CFD-Bench workloads W1–W8")
@@ -12,8 +14,9 @@ def main():
     ap.add_argument("--ships", nargs="+", default=None)
     ap.add_argument("--duration", type=float, default=60.0)
     ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
+    ap.add_argument("--vtk-dir", default=resolve_vtk_dir())
+    ap.add_argument("--vtk-hull-dir", default=resolve_vtk_hull_dir())
+    ap.add_argument("--tiledb-root", default=resolve_tiledb_root())
     args, extra = ap.parse_known_args()
 
     for w in args.workloads:
@@ -25,6 +28,7 @@ def main():
         argv += ["--duration", str(args.duration)]
         argv += ["--backend"] + args.backend
         argv += ["--vtk-dir", args.vtk_dir]
+        argv += ["--vtk-hull-dir", args.vtk_hull_dir]
         argv += ["--tiledb-root", args.tiledb_root]
         argv += extra
         import sys

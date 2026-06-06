@@ -16,6 +16,10 @@ class VTKMeshClient:
         self.vtk_mesh = None
         self.ctx: Optional[MeshContext] = None
 
+    def close(self):
+        self.vtk_mesh = None
+        self.ctx = None
+
     def connect(
         self,
         dataset_key: str,
@@ -46,7 +50,13 @@ class VTKMeshClient:
         array = self.vtk_mesh.GetCellData().GetArray(attribute_name)
         if not array:
             return np.array([], dtype=np.float64)
-        return np.array([array.GetValue(int(cell_id)) for cell_id in cell_indexes], dtype=np.float64)
+        n = int(array.GetNumberOfTuples())
+        vals = []
+        for cell_id in cell_indexes:
+            cid = int(cell_id)
+            if 0 <= cid < n:
+                vals.append(array.GetValue(cid))
+        return np.array(vals, dtype=np.float64)
 
     def range_query_var(
         self, lower_bound: float, upper_bound: float, attribute_name: str, step: Optional[int] = None
@@ -86,9 +96,12 @@ class VTKMeshClient:
         cell_locator = vtkCellLocator()
         cell_locator.SetDataSet(self.vtk_mesh)
         cell_locator.BuildLocator()
+        n_cells = int(self.vtk_mesh.GetNumberOfCells())
         cell_indexes = []
         for point in points:
-            cell_indexes.append(cell_locator.FindCell(point))
+            cid = int(cell_locator.FindCell(point))
+            if 0 <= cid < n_cells:
+                cell_indexes.append(cid)
         return np.array(cell_indexes, dtype=np.int32)
 
     def line_intersection(self, line_start: Sequence[float], line_end: Sequence[float]) -> NDArray[np.int32]:

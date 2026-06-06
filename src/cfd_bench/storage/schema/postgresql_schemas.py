@@ -13,3 +13,16 @@ CELL_SCALAR = "cell_scalar"
 NODE_SCALAR = "node_scalar"
 CELL_QCRITERION = "cell_qcriterion"
 CELL_GRADIENT = "cell_gradient"
+
+# PostGIS spatial acceleration
+CELL_GEOM_FULL = "cell_geom_full"
+POINT_LOCATOR_GRID = "point_locator_grid"
+BOUNDARY_FACE_GEOM = "boundary_face_geom"
+
+# Legacy mesh tables (benchmark_1 compatible)
+MESH_METADATA = "mesh_metadata"
+CELL_CENTROID = "cell_centroid"
+CELL_FACE_PLANE = "cell_face_plane"
+CELL_ADJACENCY_LEGACY = "cell_adjacency"
+NODE_COORDINATES = "node_coordinates"
+CELL_NODES_LEGACY = "cell_nodes"

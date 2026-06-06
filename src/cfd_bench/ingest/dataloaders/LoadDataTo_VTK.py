@@ -23,6 +23,8 @@ from vtkmodules.vtkRenderingCore import (
 )
 from vtkmodules.vtkCommonColor import vtkNamedColors
 
+from cfd_bench.core.paths import resolve_vtk_dir, resolve_vtk_hull_dir
+
 DEBUG = False
 SAVE_VTK = True
 DATA_SOURCE = 0 # 0 for .dat and 1 for .vtk
@@ -55,8 +57,10 @@ def main(input_path = None):
                         ''' 
                             Write unstructured grid to .vtk file.
                         '''
-                        output_fluid_file_dir = "vtk_dir/"
-                        output_hull_file_dir = "vtk_hull_dir/"
+                        output_fluid_file_dir = resolve_vtk_dir()
+                        output_hull_file_dir = resolve_vtk_hull_dir()
+                        os.makedirs(output_fluid_file_dir, exist_ok=True)
+                        os.makedirs(output_hull_file_dir, exist_ok=True)
 
                         file_prefix_fluid = "Suboff_3258k_GEO_"
                         file_prefix_hull = "Suboff_3258k_hull_"

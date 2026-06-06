@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
 from cfd_bench.core.context import DatasetKey, MeshContext, parse_dataset_key
 from cfd_bench.core.types import LiteMesh, LitePolyData
+from cfd_bench.infra.postgresql.client import LegacyPGMeshBackend
+from cfd_bench.infra.postgresql.mesh_runtime import PGMeshRuntime
+from cfd_bench.infra.postgresql import spatial as pg_spatial
 
 
 @dataclass
@@ -19,19 +22,19 @@ class PostgreSQLConfig:
 
 
 class PostgreSQLMeshClient:
-    """PostgreSQL mesh client — PostGIS backend + cae_simulation_data via workloads helper."""
+    """PostgreSQL mesh client with PostGIS spatial acceleration."""
 
     def __init__(self, config: Optional[PostgreSQLConfig] = None, **kwargs):
         self.config = config or PostgreSQLConfig()
         self._kwargs = kwargs
-        self._inner = None
+        self._inner: Optional[LegacyPGMeshBackend] = None
+        self.runtime: Optional[PGMeshRuntime] = None
         self.ctx: Optional[MeshContext] = None
         self._key: Optional[DatasetKey] = None
+        self._centroids_cache: Optional[Dict] = None
 
     def _ensure_inner(self):
         if self._inner is None:
-            from cfd_bench.infra.postgresql.client import LegacyPGMeshBackend
-
             key = self._key or DatasetKey("JBC", "615k")
             self._inner = LegacyPGMeshBackend(
                 ship_type=key.ship,
@@ -44,11 +47,14 @@ class PostgreSQLMeshClient:
                 db_host=self.config.db_host,
                 db_port=self.config.db_port,
             )
+            self.runtime = PGMeshRuntime(self._inner.conn, key.ship, key.scale, key.zone)
 
     def close(self):
         if self._inner is not None:
             self._inner.close()
             self._inner = None
+        self.runtime = None
+        self._centroids_cache = None
 
     def connect(
         self,
@@ -59,9 +65,46 @@ class PostgreSQLMeshClient:
     ) -> MeshContext:
         self._key = parse_dataset_key(dataset_key, zone=zone, step=step)
         self._inner = None
+        self._centroids_cache = None
         self._ensure_inner()
         ctx = MeshContext(dataset_key=self._key.dataset_key, step=int(step), zone=zone)
-        ctx.available_caps.update({"cell_vars"})
+        conn = self._inner.conn
+        st, sc, zt = self._key.ship, self._key.scale, self._key.zone
+        if pg_spatial.fetch_cell_count(conn, st, sc, zt) > 0:
+            ctx.available_caps.add("mesh_static")
+        else:
+            ctx.missing_caps.add("mesh_static")
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT 1 FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s AND timestep=%s
+                LIMIT 1
+                """,
+                (st, sc, zt, int(step)),
+            )
+            if cur.fetchone():
+                ctx.available_caps.add("cell_vars")
+            else:
+                ctx.missing_caps.add("cell_vars")
+        finally:
+            cur.close()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM cell_geom_full
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s LIMIT 1
+                """,
+                (st, sc, zt),
+            )
+            if cur.fetchone():
+                ctx.available_caps.add("postgis_spatial")
+        except Exception:
+            pass
+        finally:
+            cur.close()
         self.ctx = ctx
         return ctx
 
@@ -70,21 +113,55 @@ class PostgreSQLMeshClient:
             raise RuntimeError("请先调用 connect(...) 初始化上下文")
         return self.ctx
 
+    def _sync_timestep(self, step: Optional[int]):
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        if self._inner is not None:
+            self._inner.timestep = int(ts)
+
+    def get_cell_count(self) -> int:
+        self._ensure_inner()
+        key = self._key
+        return pg_spatial.fetch_cell_count(self._inner.conn, key.ship, key.scale, key.zone)
+
+    def var_value_range(self, attribute_name: str, step: Optional[int] = None) -> Tuple[float, float]:
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        return pg_spatial.fetch_var_value_range(
+            self._inner.conn, key.ship, key.scale, key.zone, ts, attribute_name
+        )
+
     def point_query(self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None) -> np.ndarray:
         self._ensure_inner()
+        self._sync_timestep(step)
         return self._inner.point_query(None, cell_indexes, attribute_name, timestep=step)
 
     def range_query_var(
         self, lower_bound: float, upper_bound: float, attribute_name: str, step: Optional[int] = None
     ) -> np.ndarray:
         self._ensure_inner()
+        self._sync_timestep(step)
         return self._inner.range_query_var(None, lower_bound, upper_bound, attribute_name, timestep=step)
 
     def range_query_coord(self, lower_bound: Sequence[float], upper_bound: Sequence[float]) -> np.ndarray:
-        raise NotImplementedError("PostgreSQL range_query_coord requires modern mesh_static tables")
+        self._ensure_inner()
+        key = self._key
+        return pg_spatial.range_query_coord(
+            self._inner.conn, key.ship, key.scale, key.zone, lower_bound, upper_bound
+        )
 
     def point_intersection(self, points: np.ndarray) -> np.ndarray:
-        raise NotImplementedError("PostgreSQL point_intersection requires modern mesh_static tables")
+        self._ensure_inner()
+        key = self._key
+        if self._centroids_cache is None:
+            self._centroids_cache = pg_spatial._fetch_centroids_map(
+                self._inner.conn, key.ship, key.scale, key.zone
+            )
+        return pg_spatial.point_intersection(
+            self._inner.conn, key.ship, key.scale, key.zone, points, self._centroids_cache
+        )
 
     def line_intersection(self, line_start: Sequence[float], line_end: Sequence[float]) -> np.ndarray:
         self._ensure_inner()
@@ -95,13 +172,45 @@ class PostgreSQLMeshClient:
         return self._inner.vtk_plane_intersection(None, plane_origin, plane_norm)
 
     def extract_submesh(self, cell_indexes: Sequence[int], mesh_handle=None) -> LiteMesh:
-        raise NotImplementedError("PostgreSQL extract_submesh requires modern mesh_static tables")
+        self._ensure_inner()
+        return self.runtime.extract_submesh(cell_indexes)
 
     def isosurface_extraction(self, variable_name: str, iso_value: float, step: Optional[int] = None) -> LitePolyData:
-        raise NotImplementedError("PostgreSQL isosurface_extraction not yet implemented")
+        self._ensure_inner()
+        self._sync_timestep(step)
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        data = self.runtime.ensure_cell_nodes()
+        cell_ids = list(data.cells.keys())
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT cell_id, value FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                  AND timestep=%s AND var=%s AND cell_id = ANY(%s)
+                """,
+                (
+                    self._key.ship,
+                    self._key.scale,
+                    self._key.zone,
+                    ts,
+                    str(variable_name).upper(),
+                    cell_ids,
+                ),
+            )
+            scalar_map = {int(cid): float(v) for cid, v in cur.fetchall()}
+        finally:
+            cur.close()
+        return self.runtime.isosurface(scalar_map, float(iso_value))
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
-        raise NotImplementedError("PostgreSQL surface_norm requires modern mesh_static tables")
+        self._ensure_inner()
+        key = self._key
+        _, norms = pg_spatial.fetch_boundary_normals(
+            self._inner.conn, key.ship, key.scale, key.zone
+        )
+        return norms
 
     def compute_qcriterion_roi(
         self,
@@ -110,4 +219,18 @@ class PostgreSQLMeshClient:
         tau: Optional[float] = None,
         step: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        raise NotImplementedError("PostgreSQL compute_qcriterion_roi not yet implemented")
+        self._ensure_inner()
+        self._sync_timestep(step)
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        return pg_spatial.compute_qcriterion_roi(
+            self._inner.conn,
+            key.ship,
+            key.scale,
+            key.zone,
+            ts,
+            lower_bound,
+            upper_bound,
+            tau if tau is not None else 0.0,
+        )

@@ -77,14 +77,14 @@ def write_cells(uri: str, rows: dict, cell_count: int, ctx: Optional[tiledb.Ctx]
 
 def write_cell_nodes(uri: str, matrix: np.ndarray, cell_count: int, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
     ensure_parent(uri)
-    schema.create_dense_array(uri, schema.schema_cell_nodes(cell_count, ctx), overwrite=overwrite, ctx=ctx)
+    schema.create_dense_array(uri, schema.schema_cell_nodes(cell_count, ctx=ctx), overwrite=overwrite, ctx=ctx)
     data = {f"node_id_{i}": matrix[:, i].astype(np.int32) for i in range(matrix.shape[1])}
     schema.write_dense_by_id(uri, data, "cell_id", ctx=ctx)
 
 
 def write_cell_adjacency(uri: str, matrix: np.ndarray, cell_count: int, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
     ensure_parent(uri)
-    schema.create_dense_array(uri, schema.schema_cell_adjacency(cell_count, ctx), overwrite=overwrite, ctx=ctx)
+    schema.create_dense_array(uri, schema.schema_cell_adjacency(cell_count, ctx=ctx), overwrite=overwrite, ctx=ctx)
     data = {f"neighbor_id_{i}": matrix[:, i].astype(np.int32) for i in range(matrix.shape[1])}
     schema.write_dense_by_id(uri, data, "cell_id", ctx=ctx)
 

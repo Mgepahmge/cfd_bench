@@ -1,9 +1,37 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Literal
 
 from .context import DatasetKey
+
+
+def resolve_data_root() -> str:
+    """Shared data root (sibling to vtk_dir, TileDB_Instances, etc.)."""
+    env = os.environ.get("CFD_BENCH_DATA_ROOT")
+    if env:
+        return str(Path(env).expanduser().resolve())
+    for candidate in (Path.home() / "data", Path("/data")):
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str((Path.home() / "data").resolve())
+
+
+def resolve_vtk_dir() -> str:
+    return os.path.join(resolve_data_root(), "vtk_dir")
+
+
+def resolve_vtk_hull_dir() -> str:
+    return os.path.join(resolve_data_root(), "vtk_hull_dir")
+
+
+def resolve_tiledb_root() -> str:
+    return os.path.join(resolve_data_root(), "TileDB_Instances")
+
+
+def resolve_max_range_dir() -> str:
+    return os.path.join(resolve_data_root(), "Max_Range")
 
 Backend = Literal["iotdb", "tiledb", "postgresql"]
 

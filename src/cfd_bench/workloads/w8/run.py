@@ -6,10 +6,10 @@ import argparse
 import random
 import time
 
-import numpy as np
-
 from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
+from cfd_bench.workloads.common.geom_resolver import make_geom_client, random_var_range_db, uses_vtk_geom
 
 
 def random_var_range_vtk(vtk_mesh, attribute_name: str):
@@ -21,58 +21,78 @@ def random_var_range_vtk(vtk_mesh, attribute_name: str):
     return lo, hi
 
 
-def _bench(label, range_fn, geom, duration):
+def _bench(label, range_fn, client, geom_client, duration, step):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
         var = random.choice(VARIABLES)
-        if geom is not None:
-            lo, hi = random_var_range_vtk(geom.vtk_mesh, var)
+        if geom_client is not None and hasattr(geom_client, "vtk_mesh") and geom_client.vtk_mesh is not None:
+            lo, hi = random_var_range_vtk(geom_client.vtk_mesh, var)
         else:
-            lo, hi = 0.0, 1.0
+            lo, hi = random_var_range_db(client, var, step=step)
         range_fn(lo, hi, var)
         txn += 1
     print(f"{label} W8: {txn} txns in {duration}s")
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
-    geom = make_vtk(cfg.vtk_dir, ship, step)
-
     if "postgresql" in backends:
-        pg = make_pg(ship, "fluid")
-        pg.set_step(step)
-        _bench("PG", lambda lo, hi, v: pg.range_query_var(lo, hi, v), geom, cfg.duration_sec)
+        pg = make_pg(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
+        _bench(
+            "PG",
+            lambda lo, hi, v: pg.range_query_var(lo, hi, v),
+            pg,
+            geom if uses_vtk_geom(cfg) else None,
+            cfg.duration_sec,
+            step,
+        )
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step)
-        _bench("IoTDB", lambda lo, hi, v: iotdb.range_query_var(lo, hi, v), geom, cfg.duration_sec)
+        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+        _bench(
+            "IoTDB",
+            lambda lo, hi, v: iotdb.range_query_var(lo, hi, v),
+            iotdb,
+            geom if uses_vtk_geom(cfg) else None,
+            cfg.duration_sec,
+            step,
+        )
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root)
-        _bench("TileDB", lambda lo, hi, v: tiledb.range_query_var(lo, hi, v), geom, cfg.duration_sec)
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+        _bench(
+            "TileDB",
+            lambda lo, hi, v: tiledb.range_query_var(lo, hi, v),
+            tiledb,
+            geom if uses_vtk_geom(cfg) else None,
+            cfg.duration_sec,
+            step,
+        )
         tiledb.close()
 
     if "vtk" in backends:
-        _bench("VTK", lambda lo, hi, v: geom.range_query_var(lo, hi, v), geom, cfg.duration_sec)
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+        _bench(
+            "VTK",
+            lambda lo, hi, v: vtk.range_query_var(lo, hi, v),
+            vtk,
+            vtk,
+            cfg.duration_sec,
+            step,
+        )
+        vtk.close()
 
 
 def main(ships=None):
     ap = argparse.ArgumentParser(description="W8: variable range query")
-    ap.add_argument("--ships", nargs="+", default=None)
-    ap.add_argument("--duration", type=float, default=60.0)
-    ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
+    add_common_workload_args(ap)
     args = ap.parse_args()
-
-    cfg = WorkloadConfig(
-        ships=args.ships or ships or WorkloadConfig().ships,
-        duration_sec=args.duration,
-        vtk_dir=args.vtk_dir,
-        tiledb_root=args.tiledb_root,
-    )
+    cfg = workload_config_from_args(args, ships=ships)
     for ship in cfg.ships:
         for step in cfg.valid_steps(ship):
             if cfg.skip_step(ship, step):

@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Sequence
 
+from cfd_bench.core.paths import (
+    resolve_max_range_dir,
+    resolve_tiledb_root,
+    resolve_vtk_dir,
+    resolve_vtk_hull_dir,
+)
+
 
 DEFAULT_SHIPS = ["JBC_615k", "JBC_3843k", "Kvlcc2_351k", "Kvlcc2_3709k", "Suboff_3258k"]
 DEFAULT_STEPS = [200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000]
@@ -16,12 +23,13 @@ SHIPS_WITHOUT_STEP_2000 = {"JBC_3843k", "Kvlcc2_3709k"}
 class WorkloadConfig:
     ships: List[str] = field(default_factory=lambda: list(DEFAULT_SHIPS))
     duration_sec: float = 60.0
-    vtk_dir: str = "../vtk_dir"
-    vtk_hull_dir: str = "../vtk_hull_dir"
-    tiledb_root: str = "../TileDB_Instances"
-    max_range_dir: str = "../Max_Range"
+    vtk_dir: str = field(default_factory=resolve_vtk_dir)
+    vtk_hull_dir: str = field(default_factory=resolve_vtk_hull_dir)
+    tiledb_root: str = field(default_factory=resolve_tiledb_root)
+    max_range_dir: str = field(default_factory=resolve_max_range_dir)
+    geom_engine: str = "db"
     zone_fluid: str = "0_Fluid"
-    zone_hull: str = "1_Hull"
+    zone_hull: str = "0_Wall_hull"
 
     def valid_steps(self, ship: str) -> List[int]:
         if ship in SHIPS_WITHOUT_STEP_2000:

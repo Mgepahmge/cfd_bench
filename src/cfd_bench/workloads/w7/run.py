@@ -6,10 +6,10 @@ import argparse
 import random
 import time
 
-import numpy as np
-
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk, mesh_bounds_from_client
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
+from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.random_geom import random_coord_range
 
 
@@ -38,7 +38,6 @@ def _bench_vtk(label, geom, bounds, duration):
                 break
         sub = geom.extract_submesh(cells)
         if sub is not None:
-            geom.vtk_mesh = sub
             try:
                 from vtk import vtkDataObject, vtkGradientFilter
 
@@ -56,66 +55,64 @@ def _bench_vtk(label, geom, bounds, duration):
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
-    geom = make_vtk(cfg.vtk_dir, ship, step)
-    bounds = mesh_bounds_from_client(geom)
-    if bounds is None:
-        return
+    shared_bounds = None
 
     if "postgresql" in backends:
-        pg = make_pg(ship, "fluid")
-        pg.set_step(step)
-        _bench_db(
-            "PG",
-            pg.range_query_coord,
-            lambda lo, hi: geom.extract_submesh(pg.range_query_coord(lo, hi)),
-            bounds,
-            cfg.duration_sec,
-        )
+        pg = make_pg(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, pg, geom, cfg.zone_fluid)
+        if bounds:
+            _bench_db(
+                "PG",
+                geom.range_query_coord,
+                lambda lo, hi: pg.compute_qcriterion_roi(lo, hi),
+                bounds,
+                cfg.duration_sec,
+            )
+            shared_bounds = bounds
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step)
-        db_bounds = mesh_bounds_from_client(iotdb) or bounds
-        _bench_db(
-            "IoTDB",
-            iotdb.range_query_coord,
-            lambda lo, hi: iotdb.compute_qcriterion_roi(lo, hi),
-            db_bounds,
-            cfg.duration_sec,
-        )
+        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, iotdb, geom, cfg.zone_fluid) or shared_bounds
+        if bounds:
+            _bench_db(
+                "IoTDB",
+                geom.range_query_coord,
+                lambda lo, hi: iotdb.compute_qcriterion_roi(lo, hi),
+                bounds,
+                cfg.duration_sec,
+            )
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root)
-        db_bounds = mesh_bounds_from_client(tiledb) or bounds
-        _bench_db(
-            "TileDB",
-            tiledb.range_query_coord,
-            lambda lo, hi: tiledb.compute_qcriterion_roi(lo, hi),
-            db_bounds,
-            cfg.duration_sec,
-        )
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, tiledb, geom, cfg.zone_fluid) or shared_bounds
+        if bounds:
+            _bench_db(
+                "TileDB",
+                geom.range_query_coord,
+                lambda lo, hi: tiledb.compute_qcriterion_roi(lo, hi),
+                bounds,
+                cfg.duration_sec,
+            )
         tiledb.close()
 
     if "vtk" in backends:
-        _bench_vtk("VTK", geom, bounds, cfg.duration_sec)
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+        bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.zone_fluid) or shared_bounds
+        if bounds:
+            _bench_vtk("VTK", vtk, bounds, cfg.duration_sec)
+        vtk.close()
 
 
 def main(ships=None):
     ap = argparse.ArgumentParser(description="W7: Q-criterion ROI")
-    ap.add_argument("--ships", nargs="+", default=None)
-    ap.add_argument("--duration", type=float, default=60.0)
-    ap.add_argument("--backend", nargs="+", default=["postgresql", "iotdb", "tiledb", "vtk"])
-    ap.add_argument("--vtk-dir", default="../vtk_dir")
-    ap.add_argument("--tiledb-root", default="../TileDB_Instances")
+    add_common_workload_args(ap)
     args = ap.parse_args()
-
-    cfg = WorkloadConfig(
-        ships=args.ships or ships or WorkloadConfig().ships,
-        duration_sec=args.duration,
-        vtk_dir=args.vtk_dir,
-        tiledb_root=args.tiledb_root,
-    )
+    cfg = workload_config_from_args(args, ships=ships)
     for ship in cfg.ships:
         for step in cfg.valid_steps(ship):
             if cfg.skip_step(ship, step):
