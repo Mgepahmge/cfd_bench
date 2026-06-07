@@ -11,4 +11,4 @@ TileDB_Instances/
 output/
 
 # Benchmark run logs (regenerable)
-src/iotdb_test/*.log
+*.log

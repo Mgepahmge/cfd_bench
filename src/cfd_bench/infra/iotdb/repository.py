@@ -35,7 +35,7 @@ class IoTDBRepository:
     def __init__(self, config: IoTDBConfig):
         self.config = config
         self.session: Optional[Session] = None
-        self._cell_var_path_cache: Dict[Tuple[str, int], str] = {}
+        self._cell_var_path_cache: Dict[Tuple[str, int, str], str] = {}
 
     def open(self):
         if self.session is not None:
@@ -51,6 +51,16 @@ class IoTDBRepository:
     # -------------------- path helpers --------------------
     def path_cell_vars(self, dataset_key: str, step: int, leaf: str = "cell_vars") -> str:
         return f"{self.config.root_path}.post_processing_management.{dataset_key}.step_{step}.{leaf}"
+
+    @staticmethod
+    def cell_vars_leaf_for_zone(zone: str) -> str:
+        z = (zone or "0_Fluid").strip().lower()
+        if "hull" in z or "wall" in z or z in ("1_hull", "hull"):
+            return "cell_vars_hull"
+        return "cell_vars"
+
+    def path_cell_vars_for_zone(self, dataset_key: str, step: int, zone: str = "0_Fluid") -> str:
+        return self.path_cell_vars(dataset_key, step, self.cell_vars_leaf_for_zone(zone))
 
     def path_node_vars(self, dataset_key: str, step: int) -> str:
         return f"{self.config.root_path}.post_processing_management.{dataset_key}.step_{step}.node_vars"
@@ -76,30 +86,33 @@ class IoTDBRepository:
             out.append((int(row.get_timestamp()), fields))
         return out
 
-    def resolve_cell_var_path(self, dataset_key: str, step: int, probe_var: str = "P") -> str:
-        key = (dataset_key, int(step))
+    def resolve_cell_var_path(
+        self, dataset_key: str, step: int, zone: str = "0_Fluid", probe_var: str = "P"
+    ) -> str:
+        key = (dataset_key, int(step), zone)
         if key in self._cell_var_path_cache:
             return self._cell_var_path_cache[key]
-        candidates = [
-            self.path_cell_vars(dataset_key, step, "cell_vars"),
-            self.path_cell_vars(dataset_key, step, "Variables"),
-        ]
-        for path in candidates:
-            try:
-                rows = self.query_rows(f"SELECT {probe_var} FROM {path} LIMIT 1;")
-                if rows:
-                    self._cell_var_path_cache[key] = path
-                    return path
-            except Exception:
-                continue
+        path = self.path_cell_vars_for_zone(dataset_key, step, zone)
+        try:
+            rows = self.query_rows(f"SELECT {probe_var} FROM {path} LIMIT 1;")
+            if rows:
+                self._cell_var_path_cache[key] = path
+                return path
+        except Exception:
+            pass
         raise RuntimeError(
-            f"未找到可用变量路径: {candidates}. "
-            "请确认 IoTDB 中存在 step_xxx.cell_vars 或 step_xxx.Variables。"
+            f"未找到 IoTDB 变量路径: {path}. "
+            "请先运行 cfd-bench ingest 导入 step_xxx.cell_vars。"
         )
 
     # -------------------- scalar queries --------------------
     def fetch_cell_scalar_map(
-        self, dataset_key: str, step: int, var: str, cell_ids: Sequence[int]
+        self,
+        dataset_key: str,
+        step: int,
+        var: str,
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
     ) -> Dict[int, float]:
         if cell_ids is None:
             norm_ids: List[int] = []
@@ -108,15 +121,21 @@ class IoTDBRepository:
         if len(norm_ids) == 0:
             return {}
         idx = ",".join(str(i) for i in norm_ids)
-        path = self.resolve_cell_var_path(dataset_key, step, probe_var=var)
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
         sql = f"SELECT {var} FROM {path} WHERE Time IN ({idx});"
         rows = self.query_rows(sql)
         return {cid: _to_float(vals[0]) for cid, vals in rows}
 
     def fetch_cell_ids_by_var_range(
-        self, dataset_key: str, step: int, var: str, lower: float, upper: float
+        self,
+        dataset_key: str,
+        step: int,
+        var: str,
+        lower: float,
+        upper: float,
+        zone: str = "0_Fluid",
     ) -> List[int]:
-        path = self.resolve_cell_var_path(dataset_key, step, probe_var=var)
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
         sql = (
             f"SELECT {var} FROM {path} "
             f"WHERE {var} >= {float(lower)} AND {var} <= {float(upper)};"

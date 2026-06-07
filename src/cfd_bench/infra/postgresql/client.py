@@ -7,9 +7,9 @@ import psycopg2
 from numpy.typing import NDArray
 
 
-class LegacyPGMeshBackend:
+class PGMeshBackend:
     """
-    PostGIS-backed replacement for selected VTK_Interface methods.
+    PostGIS-backed mesh backend for PostgreSQLMeshClient.
 
     Implemented replaceable methods:
       - point_query

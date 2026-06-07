@@ -1,3 +1,3 @@
-from .client import LegacyPGMeshBackend
+from .client import PGMeshBackend
 
-__all__ = ["LegacyPGMeshBackend"]
+__all__ = ["PGMeshBackend"]

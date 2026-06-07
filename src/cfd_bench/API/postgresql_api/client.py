@@ -1,24 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
 from cfd_bench.core.context import DatasetKey, MeshContext, parse_dataset_key
 from cfd_bench.core.types import LiteMesh, LitePolyData
-from cfd_bench.infra.postgresql.client import LegacyPGMeshBackend
+from cfd_bench.infra.postgresql.client import PGMeshBackend
+from cfd_bench.infra.postgresql.config import PostgreSQLConfig
 from cfd_bench.infra.postgresql.mesh_runtime import PGMeshRuntime
 from cfd_bench.infra.postgresql import spatial as pg_spatial
-
-
-@dataclass
-class PostgreSQLConfig:
-    db_name: str = "cae_data"
-    db_user: str = "postgres"
-    db_password: str = "123456"
-    db_host: str = "localhost"
-    db_port: str = "5432"
 
 
 class PostgreSQLMeshClient:
@@ -27,7 +18,7 @@ class PostgreSQLMeshClient:
     def __init__(self, config: Optional[PostgreSQLConfig] = None, **kwargs):
         self.config = config or PostgreSQLConfig()
         self._kwargs = kwargs
-        self._inner: Optional[LegacyPGMeshBackend] = None
+        self._inner: Optional[PGMeshBackend] = None
         self.runtime: Optional[PGMeshRuntime] = None
         self.ctx: Optional[MeshContext] = None
         self._key: Optional[DatasetKey] = None
@@ -36,7 +27,7 @@ class PostgreSQLMeshClient:
     def _ensure_inner(self):
         if self._inner is None:
             key = self._key or DatasetKey("JBC", "615k")
-            self._inner = LegacyPGMeshBackend(
+            self._inner = PGMeshBackend(
                 ship_type=key.ship,
                 scale=key.scale,
                 zone_type=key.zone,

@@ -216,14 +216,9 @@ class TileDBRepository:
 
     # -------------------- scalar queries --------------------
     def _resolve_cell_vars_uri(self, dataset_key: str, step: int, zone: str) -> str:
-        primary = self.path_cell_vars(dataset_key, step, zone)
-        if self.array_exists(primary):
-            return primary
-        legacy = os.path.join(
-            self._base(dataset_key), "legacy", f"step_{int(step)}_{'hull' if zone in ('1_Hull', 'hull') else 'fluid'}.tdb"
-        )
-        if self.array_exists(legacy):
-            return legacy
+        uri = self.path_cell_vars(dataset_key, step, zone)
+        if self.array_exists(uri):
+            return uri
         raise FileNotFoundError(f"cell vars not found for {dataset_key} step={step} zone={zone}")
 
     def fetch_cell_scalar_map(
@@ -234,13 +229,6 @@ class TileDBRepository:
             return {}
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
-            if "Index" in [a.name for a in A.schema]:
-                # legacy sparse-style stored as dense fallback not expected; read all and map by Index
-                data = A[:]
-                index_arr = np.asarray(data["Index"], dtype=np.int32)
-                var_arr = np.asarray(data[var], dtype=np.float64)
-                lookup = {int(index_arr[i]): float(var_arr[i]) for i in range(len(index_arr))}
-                return {cid: lookup.get(cid, np.nan) for cid in norm_ids}
             idx = np.asarray(norm_ids, dtype=np.int32)
             vals = A[idx][var]
             return {int(cid): float(v) for cid, v in zip(norm_ids, vals)}
@@ -250,9 +238,6 @@ class TileDBRepository:
     ) -> np.ndarray:
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
-            if "Index" in [a.name for a in A.schema]:
-                data = A[:]
-                return np.asarray(data[var], dtype=np.float64)
             return np.asarray(A[:][var], dtype=np.float64)
 
     def fetch_cell_ids_by_var_range(
@@ -261,12 +246,8 @@ class TileDBRepository:
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
             data = A[:]
-            if "Index" in [a.name for a in A.schema]:
-                index_arr = np.asarray(data["Index"], dtype=np.int32)
-                var_arr = np.asarray(data[var], dtype=np.float64)
-            else:
-                index_arr = np.arange(len(data[var]), dtype=np.int32)
-                var_arr = np.asarray(data[var], dtype=np.float64)
+            index_arr = np.arange(len(data[var]), dtype=np.int32)
+            var_arr = np.asarray(data[var], dtype=np.float64)
         mask = (var_arr >= float(lower)) & (var_arr <= float(upper))
         return [int(i) for i in index_arr[mask]]
 

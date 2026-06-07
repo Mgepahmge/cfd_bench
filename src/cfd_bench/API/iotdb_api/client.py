@@ -71,7 +71,9 @@ class IoTDBMeshClient(AbstractContextManager):
             if not v:
                 continue
             try:
-                path = self.repo.resolve_cell_var_path(dataset_key, int(step), probe_var=v)
+                path = self.repo.resolve_cell_var_path(
+                    dataset_key, int(step), zone=zone, probe_var=v
+                )
                 rows = self.repo.query_rows(f"SELECT {v} FROM {path} LIMIT 1;")
                 if rows:
                     ctx.available_caps.add("cell_vars")
@@ -102,7 +104,9 @@ class IoTDBMeshClient(AbstractContextManager):
     def point_query(self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None) -> np.ndarray:
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        scalar_map = self.repo.fetch_cell_scalar_map(ctx.dataset_key, ts, attribute_name, cell_indexes)
+        scalar_map = self.repo.fetch_cell_scalar_map(
+            ctx.dataset_key, ts, attribute_name, cell_indexes, zone=ctx.zone
+        )
         out = [scalar_map.get(int(cid), np.nan) for cid in cell_indexes]
         return np.array(out, dtype=np.float64)
 
@@ -111,7 +115,9 @@ class IoTDBMeshClient(AbstractContextManager):
     ) -> np.ndarray:
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        ids = self.repo.fetch_cell_ids_by_var_range(ctx.dataset_key, ts, attribute_name, lower_bound, upper_bound)
+        ids = self.repo.fetch_cell_ids_by_var_range(
+            ctx.dataset_key, ts, attribute_name, lower_bound, upper_bound, zone=ctx.zone
+        )
         return np.array(ids, dtype=np.int32)
 
     def range_query_coord(self, lower_bound: Sequence[float], upper_bound: Sequence[float]) -> np.ndarray:
@@ -150,7 +156,9 @@ class IoTDBMeshClient(AbstractContextManager):
         data = self.runtime.ensure_cell_nodes(ctx.dataset_key, ctx.zone)
         ts = ctx.step if step is None else int(step)
         cell_ids = list(data.cells.keys())
-        scalar_map = self.repo.fetch_cell_scalar_map(ctx.dataset_key, ts, variable_name, cell_ids)
+        scalar_map = self.repo.fetch_cell_scalar_map(
+            ctx.dataset_key, ts, variable_name, cell_ids, zone=ctx.zone
+        )
         return iotdb_isosurface_extraction(data, scalar_map, float(iso_value))
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:

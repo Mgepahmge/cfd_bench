@@ -54,14 +54,6 @@ def iotdb_derived(key: DatasetKey, leaf: str) -> str:
     return f"{iotdb_root()}.derived.{key.dataset_key}.step_{int(key.step)}.{leaf}"
 
 
-def iotdb_legacy_elements(key: DatasetKey) -> str:
-    return f"{iotdb_root()}.post_processing_management.{key.dataset_key}.Elements"
-
-
-def iotdb_legacy_variables(key: DatasetKey) -> str:
-    return f"{iotdb_root()}.post_processing_management.{key.dataset_key}.step_{int(key.step)}.Variables"
-
-
 def tiledb_root(root_path: str, key: DatasetKey) -> str:
     return os.path.join(root_path, key.dataset_key)
 
