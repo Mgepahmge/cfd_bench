@@ -156,7 +156,7 @@ def create_dense_array(uri: str, schema: tiledb.ArraySchema, overwrite: bool = F
     c = _ctx(ctx)
     if tiledb.array_exists(uri, ctx=c):
         if overwrite:
-            tiledb.Array.remove(uri, ctx=c)
+            tiledb.remove(uri, ctx=c)
         else:
             return
     tiledb.Array.create(uri, schema, ctx=c)

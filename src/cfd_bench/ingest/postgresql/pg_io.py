@@ -92,6 +92,62 @@ def _face_plane_for_zone(zone: Zone_3D):
     return out
 
 
+def _export_boundary_faces(cursor, zone: Zone_3D, ship_type: str, scale: str, zone_type: str):
+    """Parse boundary faces from zone face connectivity and INSERT into boundary_face_geom table.
+
+    A boundary face is one where exactly one of LE[left_element] / RE[right_element] is negative
+    (i.e. the face has only one adjacent cell — it is on the domain boundary / hull surface).
+    """
+    X, Y, Z = zone.Node_Coordinates[0], zone.Node_Coordinates[1], zone.Node_Coordinates[2]
+    LE, RE, FN = zone.LE, zone.RE, zone.FN
+
+    bf_rows = []
+    for f in range(zone.Face_count):
+        le, re = int(LE[f]), int(RE[f])
+        # Boundary face: exactly one side is valid (>=0), the other is -1 (wall)
+        is_boundary = (le >= 0) != (re >= 0) and (le < 0 or re < 0)
+        if not is_boundary:
+            continue
+        node_ids = FN[f]
+        if len(node_ids) < 3:
+            continue
+        pts = np.array([[float(X[n]), float(Y[n]), float(Z[n])] for n in node_ids], dtype=np.float64)
+        face_center = pts.mean(axis=0)
+        v0, v1 = pts[1] - pts[0], pts[2] - pts[0]
+        n = np.cross(v0, v1)
+        nnorm = np.linalg.norm(n)
+        if nnorm < 1e-15:
+            continue
+        n = n / nnorm
+        area = float(max(1e-12, nnorm * 0.5))
+        cid = max(le, re)  # the valid cell adjacent to this boundary face
+        bf_rows.append((
+            ship_type, scale, zone_type,
+            int(cid),
+            area,
+            float(n[0]), float(n[1]), float(n[2]),
+            "ST_SetSRID(ST_GeomFromText('POINT Z("
+                f"{float(face_center[0]):.17g} {float(face_center[1]):.17g} {float(face_center[2]):.17g}"
+                ")',0),0)",
+            "default",
+        ))
+
+    if not bf_rows:
+        return
+
+    # Clear old data for this ship/scale/zone
+    cursor.execute(
+        "DELETE FROM boundary_face_geom WHERE ship_type=%s AND scale=%s AND zone_type=%s",
+        (ship_type, scale, zone_type),
+    )
+    _batch_insert(
+        cursor,
+        "boundary_face_geom",
+        ["ship_type", "scale", "zone_type", "cell_id", "area", "nx", "ny", "nz", "geom", "patch_name"],
+        bf_rows,
+    )
+
+
 def export_zone_to_pg(
     zone: Zone_3D,
     ship_type: str,
@@ -175,6 +231,10 @@ def export_zone_to_pg(
                 ["ship_type", "scale", "zone_type", "node_id", "x", "y", "z"],
                 rows_n,
             )
+
+        # --- W6: Export boundary faces into boundary_face_geom table ---
+        _export_boundary_faces(cursor, zone, ship_type, scale, zone_type)
+
         conn.commit()
     except Exception:
         conn.rollback()

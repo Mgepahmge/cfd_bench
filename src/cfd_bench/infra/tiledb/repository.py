@@ -229,9 +229,9 @@ class TileDBRepository:
             return {}
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
-            idx = np.asarray(norm_ids, dtype=np.int32)
-            vals = A[idx][var]
-            return {int(cid): float(v) for cid, v in zip(norm_ids, vals)}
+            data = A[:]
+            arr = np.asarray(data[var], dtype=np.float64)
+            return {int(cid): float(arr[cid]) for cid in norm_ids}
 
     def fetch_all_cell_scalars(
         self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"
@@ -259,11 +259,10 @@ class TileDBRepository:
             return {}
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
-            idx = np.asarray(norm_ids, dtype=np.int32)
-            data = A[idx]
+            data = A[:]
             return {
-                int(cid): (float(data["U"][j]), float(data["V"][j]), float(data["W"][j]))
-                for j, cid in enumerate(norm_ids)
+                int(cid): (float(data["U"][cid]), float(data["V"][cid]), float(data["W"][cid]))
+                for cid in norm_ids
             }
 
     def fetch_qcriterion_by_roi(
@@ -287,11 +286,11 @@ class TileDBRepository:
         if not roi_ids:
             return []
         with self.open_array(qc_uri, "r") as A:
-            idx = np.asarray(roi_ids, dtype=np.int32)
-            qvals = A[idx]["q"]
+            data = A[:]
+            q_arr = np.asarray(data["q"], dtype=np.float64)
         out = []
-        for cid, q in zip(roi_ids, qvals):
-            qf = float(q)
+        for cid in roi_ids:
+            qf = float(q_arr[cid])
             if qf >= float(tau):
                 out.append((int(cid), qf))
         out.sort(key=lambda x: -x[1])

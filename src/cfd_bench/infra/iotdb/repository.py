@@ -142,6 +142,26 @@ class IoTDBRepository:
         )
         return [cid for cid, _ in self.query_rows(sql)]
 
+    def fetch_velocity_map(
+        self,
+        dataset_key: str,
+        step: int,
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
+    ) -> Dict[int, Tuple[float, float, float]]:
+        norm_ids = [int(i) for i in cell_ids]
+        if not norm_ids:
+            return {}
+        idx = ",".join(str(i) for i in norm_ids)
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var="U")
+        sql = f"SELECT U,V,W FROM {path} WHERE Time IN ({idx});"
+        rows = self.query_rows(sql)
+        return {
+            cid: (_to_float(vals[0]), _to_float(vals[1]), _to_float(vals[2]))
+            for cid, vals in rows
+            if len(vals) >= 3
+        }
+
     # -------------------- mesh static --------------------
     def fetch_cells(self, dataset_key: str, zone: str) -> Dict[int, Tuple[float, ...]]:
         path = self.path_mesh_static(dataset_key, zone, "cells")

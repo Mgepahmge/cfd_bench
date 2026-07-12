@@ -11,12 +11,14 @@ from cfd_bench.infra.iotdb.config import IoTDBConfig
 from cfd_bench.infra.iotdb.mesh_runtime import MeshRuntime
 from cfd_bench.infra.iotdb.repository import IoTDBRepository
 from cfd_bench.mesh_ops import (
+    compute_qcriterion_roi,
     iotdb_extract_submesh,
     iotdb_isosurface_extraction,
     iotdb_line_intersection,
     iotdb_plane_intersection,
     iotdb_point_intersection,
     iotdb_surface_norm,
+    iotdb_surface_norm_from_mesh,
 )
 
 
@@ -162,9 +164,43 @@ class IoTDBMeshClient(AbstractContextManager):
         return iotdb_isosurface_extraction(data, scalar_map, float(iso_value))
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
+        # W6 lightweight path: return normals from pre-stored boundary_faces (algorithm step 1)
+        if mesh_handle is None:
+            ctx = self._require_ctx()
+            bf = self.repo.fetch_boundary_faces(ctx.dataset_key, ctx.zone)
+            if not bf:
+                raise RuntimeError(f"No boundary_faces data for {ctx.dataset_key} zone={ctx.zone}")
+            # Aggregate per-cell: area-weighted average normal (matches PG fetch_boundary_normals logic)
+            cell_norms: dict = {}
+            for cid, _patch, nx, ny, nz, area, *_cx_cy_cz in bf:
+                area_f = float(area)
+                prev = cell_norms.get(int(cid))
+                if prev is None:
+                    cell_norms[int(cid)] = [float(nx) * area_f, float(ny) * area_f, float(nz) * area_f, area_f]
+                else:
+                    prev[0] += float(nx) * area_f
+                    prev[1] += float(ny) * area_f
+                    prev[2] += float(nz) * area_f
+                    prev[3] += area_f
+            sorted_cids = sorted(cell_norms.keys())
+            norms = np.array(
+                [[cell_norms[c][0] / max(cell_norms[c][3], 1e-15),
+                  cell_norms[c][1] / max(cell_norms[c][3], 1e-15),
+                  cell_norms[c][2] / max(cell_norms[c][3], 1e-15)]
+                 for c in sorted_cids],
+                dtype=np.float64,
+            )
+            # Normalize each row to unit length
+            lengths = np.linalg.norm(norms, axis=1, keepdims=True)
+            lengths = np.maximum(lengths, 1e-15)
+            norms = norms / lengths
+            return norms
+        # Fallback: compute from submesh (isosurface / other workloads)
         if isinstance(mesh_handle, LitePolyData):
             return iotdb_surface_norm(mesh_handle)
-        raise TypeError("IoTDB surface_norm requires LitePolyData from isosurface_extraction")
+        if isinstance(mesh_handle, LiteMesh):
+            return iotdb_surface_norm_from_mesh(mesh_handle)
+        raise TypeError("IoTDB surface_norm requires LiteMesh or LitePolyData")
 
     def compute_qcriterion_roi(
         self,
@@ -173,4 +209,10 @@ class IoTDBMeshClient(AbstractContextManager):
         tau: Optional[float] = None,
         step: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        raise NotImplementedError("IoTDB compute_qcriterion_roi: use materialized cell_qcriterion or TileDB client")
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        data = self.runtime.ensure_adjacency(ctx.dataset_key, ctx.zone)
+        roi_ids = self.range_query_coord(lower_bound, upper_bound)
+        vel_map = self.repo.fetch_velocity_map(ctx.dataset_key, ts, roi_ids, zone=ctx.zone)
+        cell_ids, qvals = compute_qcriterion_roi(data, roi_ids, vel_map, tau=tau)
+        return np.array(cell_ids, dtype=np.int32), np.array(qvals, dtype=np.float64)
