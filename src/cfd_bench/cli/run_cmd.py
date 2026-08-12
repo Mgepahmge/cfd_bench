@@ -9,12 +9,12 @@ from cfd_bench.workloads.runner import DEFAULT_WORKLOADS, run_all
 
 
 def add_run_parser(subparsers: argparse._SubParsersAction) -> None:
-    ap = subparsers.add_parser("run", help="Run CFD-Bench workloads W1-W8")
+    ap = subparsers.add_parser("run", help="Run CFD-Bench workloads W1-W11")
     ap.add_argument(
         "--workloads",
         nargs="+",
         default=list(DEFAULT_WORKLOADS),
-        help="Workloads to run (default: w1..w8)",
+        help="Workloads to run (default: w1..w8; H5-only: w9 w10 w11)",
     )
     add_common_workload_args(ap)
     # H5 expansion is PostgreSQL-first.  Other backends remain opt-in and all

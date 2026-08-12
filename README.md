@@ -10,7 +10,7 @@ pip install -e ".[all]"
 # One-shot ingest (PG + IoTDB + TileDB) — pass a .dat file or Postprocessing directory
 cfd-bench ingest --dat /path/to/JBC_615k/Postprocessing --datasets JBC_615k
 
-# One-shot run all workloads W1–W8
+# One-shot run legacy workloads W1–W8
 cfd-bench run --datasets JBC_615k --geom-engine db
 ```
 
@@ -27,7 +27,7 @@ PYTHONPATH=src python -m cfd_bench.cli run --datasets JBC_615k --geom-engine db
 User CLI (cfd-bench ingest | run)
     → ingest/orchestrator.py  |  workloads/runner.py
         → ingest/{iotdb,tiledb,postgresql,vtk}/
-        → workloads/w1..w8 + geom_resolver
+        → workloads/w1..w11 + geom_resolver
             → API/*MeshClient
                 → infra/* repository + mesh_runtime
 ```
@@ -43,7 +43,7 @@ src/cfd_bench/
   cli/               User entry: cfd-bench ingest / run
   core/              DatasetKey, paths, shared types
   storage/schema/    Data domains (mesh_static, post_processing, derived)
-  mesh_ops/          Shared geometry algorithms (W1–W8)
+  mesh_ops/          Shared geometry algorithms (W1–W11)
   infra/             Per-backend repository + mesh runtime
     postgresql/      PostGIS spatial layer, Q-criterion ops (W7)
   API/               Unified MeshClient facade (IoTDB, TileDB, PostgreSQL, VTK)
@@ -53,7 +53,7 @@ src/cfd_bench/
     tiledb/          TileDB topology + cell_vars
     postgresql/      PG DDL, topology/cell-vars, PostGIS ETL
     vtk/             DAT → VTK baseline export (optional)
-  workloads/         W1–W8 benchmark runners
+  workloads/         W1–W11 benchmark runners
     runner.py        Multi-workload orchestration
     common/          config, backends, geom_resolver, shared CLI
 ```
@@ -131,6 +131,9 @@ PYTHONPATH=src python -m cfd_bench.ingest.tiledb.load_cell_vars --dat_dir /path/
 | W6 | Hull surface pressure integration (normals + scalar query) |
 | W7 | ROI Q-criterion computation |
 | W8 | Variable range query (vortex / threshold cell selection) |
+| W9 | H5 element centroid coordinate range → source element IDs (PostgreSQL) |
+| W10 | H5 Frame statistics: count/min/max/mean/stddev for mapped fields (PostgreSQL) |
+| W11 | H5 source point IDs → per-point min/max across all Frames for a nodal field (PostgreSQL) |
 
 ### Geometry engine (`--geom-engine`)
 
@@ -194,7 +197,16 @@ cfd-bench run --datasets beam_static
 
 The dataset key is explicit and required via `--datasets`. `--instance`, `--steps`, `--vector-field`, `--scalar-fields`, `--map`, `--zone-fluid`, `--variables`, etc. remain available as **overrides** when the source is genuinely ambiguous; they are not required for ordinary unambiguous files. Explicit `--map` entries augment the inferred mapping instead of replacing it, so for example `--map P=S.S11` keeps automatically discovered U/V/W/E.
 
-The loader assigns dense zero-based benchmark node/cell IDs while preserving source FE labels and Step/Frame metadata in `h5_node_source`, `h5_cell_source`, and `h5_frame_metadata`. Nodal fields are averaged to cells; element/integration-point fields are reduced to one value per cell. A recognizable three-component displacement/velocity field is mapped to benchmark U/V/W. Exact P/K/E field names are loaded when present; unknown physical quantities are not silently invented.
+The loader assigns dense zero-based benchmark node/cell IDs while preserving source FE labels and Step/Frame metadata in `h5_node_source`, `h5_cell_source`, and `h5_frame_metadata`. Nodal fields are averaged to cells for the original benchmark operations **and their genuine source nodal values are also preserved in `node_scalar`** for W11; element/integration-point fields are reduced to one value per cell. A recognizable three-component displacement/velocity field is mapped to benchmark U/V/W. Exact P/K/E field names are loaded when present; unknown physical quantities are not silently invented.
+
+### H5-only workloads W9–W11
+
+W9–W11 currently target PostgreSQL datasets created by `ingest-h5`. W9 selects source H5 element labels by element-centroid coordinate box. W10 computes count/min/max/mean/population-stddev for every mapped physical quantity in a selected Frame, using genuine nodal values when the source field is nodal and cell values otherwise. W11 samples source H5 node labels and computes per-node min/max for one directly nodal physical quantity across all ingested Frames. Because v3 did not persist genuine nodal values, datasets ingested with v3 should be re-ingested before running W11.
+
+```bash
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_modal
+cfd-bench run --workloads w9 w10 w11 --datasets beam_modal --duration 10
+```
 
 ### W3 max-diff metadata
 

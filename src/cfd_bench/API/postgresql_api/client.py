@@ -266,6 +266,229 @@ class PostgreSQLMeshClient:
             cur.close()
         return self.runtime.isosurface(scalar_map, float(iso_value))
 
+    def is_h5_dataset(self) -> bool:
+        """Whether the connected dataset was ingested from the ODB-like HDF5 path."""
+        self._ensure_inner()
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute("SELECT to_regclass('public.h5_frame_metadata')")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return False
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM h5_frame_metadata
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                )
+                """,
+                (key.ship, key.scale, key.zone),
+            )
+            return bool(cur.fetchone()[0])
+        finally:
+            cur.close()
+
+    def h5_element_ids_in_coordinate_range(
+        self, lower_bound: Sequence[float], upper_bound: Sequence[float]
+    ) -> np.ndarray:
+        """W9 primitive: source H5 element labels whose centroids fall in a 3-D box."""
+        self._ensure_inner()
+        key = self._key
+        lo = np.asarray(lower_bound, dtype=np.float64).reshape(3)
+        hi = np.asarray(upper_bound, dtype=np.float64).reshape(3)
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT src.source_element_label
+                FROM cell_centroid c
+                JOIN h5_cell_source src
+                  ON src.ship_type=c.ship_type AND src.scale=c.scale
+                 AND src.zone_type=c.zone_type AND src.cell_id=c.cell_id
+                WHERE c.ship_type=%s AND c.scale=%s AND c.zone_type=%s
+                  AND c.x BETWEEN %s AND %s
+                  AND c.y BETWEEN %s AND %s
+                  AND c.z BETWEEN %s AND %s
+                ORDER BY src.source_element_label
+                """,
+                (
+                    key.ship, key.scale, key.zone,
+                    float(lo[0]), float(hi[0]),
+                    float(lo[1]), float(hi[1]),
+                    float(lo[2]), float(hi[2]),
+                ),
+            )
+            return np.asarray([int(row[0]) for row in cur.fetchall()], dtype=np.int64)
+        finally:
+            cur.close()
+
+    def frame_statistics(
+        self, attribute_name: Optional[str] = None, step: Optional[int] = None
+    ) -> Dict[str, Dict[str, object]]:
+        """W10 primitive: descriptive statistics for one HDF5 frame.
+
+        HDF5 nodal quantities are summarized from their genuine ``node_scalar``
+        values.  A mapped quantity that has no direct nodal representation is
+        summarized from ``cell_scalar`` instead.  This keeps W10 faithful to
+        the source field position while retaining the cell-centered projection
+        used by W1-W8.
+        """
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            params = [
+                key.ship, key.scale, key.zone, ts,
+                key.ship, key.scale, key.zone, ts,
+            ]
+            nodal_var_clause = ""
+            cell_var_clause = ""
+            if attribute_name is not None:
+                wanted = str(attribute_name).upper()
+                nodal_var_clause = " AND var=%s"
+                cell_var_clause = " AND c.var=%s"
+                params.insert(4, wanted)
+                params.append(wanted)
+            cur.execute(
+                f"""
+                WITH nodal AS (
+                    SELECT var, 'node'::text AS position, COUNT(*) AS n,
+                           MIN(value) AS vmin, MAX(value) AS vmax,
+                           AVG(value) AS mean, STDDEV_POP(value) AS stddev
+                    FROM node_scalar
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                      AND timestep=%s{nodal_var_clause}
+                    GROUP BY var
+                ),
+                cells AS (
+                    SELECT c.var, 'cell'::text AS position, COUNT(*) AS n,
+                           MIN(c.value) AS vmin, MAX(c.value) AS vmax,
+                           AVG(c.value) AS mean, STDDEV_POP(c.value) AS stddev
+                    FROM cell_scalar c
+                    WHERE c.ship_type=%s AND c.scale=%s AND c.zone_type=%s
+                      AND c.timestep=%s{cell_var_clause}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM node_scalar n
+                          WHERE n.ship_type=c.ship_type AND n.scale=c.scale
+                            AND n.zone_type=c.zone_type AND n.timestep=c.timestep
+                            AND n.var=c.var
+                      )
+                    GROUP BY c.var
+                )
+                SELECT var, position, n, vmin, vmax, mean, stddev FROM nodal
+                UNION ALL
+                SELECT var, position, n, vmin, vmax, mean, stddev FROM cells
+                ORDER BY var
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                suffix = (
+                    f" variable={str(attribute_name).upper()}"
+                    if attribute_name is not None
+                    else ""
+                )
+                raise ValueError(f"no values for frame={ts}{suffix}")
+            return {
+                str(var).upper(): {
+                    "position": str(position),
+                    "count": int(count),
+                    "min": float(vmin),
+                    "max": float(vmax),
+                    "mean": float(mean),
+                    "stddev": float(stddev or 0.0),
+                }
+                for var, position, count, vmin, vmax, mean, stddev in rows
+            }
+        finally:
+            cur.close()
+
+    def h5_nodal_variables(self) -> Tuple[str, ...]:
+        """Variables with direct nodal values available in every ingested HDF5 frame."""
+        self._ensure_inner()
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                WITH frame_count AS (
+                    SELECT COUNT(*) AS n
+                    FROM h5_frame_metadata
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                )
+                SELECT ns.var
+                FROM node_scalar ns CROSS JOIN frame_count f
+                WHERE ns.ship_type=%s AND ns.scale=%s AND ns.zone_type=%s
+                  AND f.n > 0
+                GROUP BY ns.var, f.n
+                HAVING COUNT(DISTINCT ns.timestep) = f.n
+                ORDER BY ns.var
+                """,
+                (
+                    key.ship, key.scale, key.zone,
+                    key.ship, key.scale, key.zone,
+                ),
+            )
+            return tuple(str(row[0]).upper() for row in cur.fetchall())
+        finally:
+            cur.close()
+
+    def h5_point_ids(self) -> np.ndarray:
+        """Return source HDF5 node labels for the connected dataset."""
+        self._ensure_inner()
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT source_node_label
+                FROM h5_node_source
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                ORDER BY source_node_label
+                """,
+                (key.ship, key.scale, key.zone),
+            )
+            return np.asarray([int(row[0]) for row in cur.fetchall()], dtype=np.int64)
+        finally:
+            cur.close()
+
+    def h5_point_frame_extrema(
+        self, point_ids: Sequence[int], attribute_name: str
+    ) -> Dict[int, Tuple[float, float]]:
+        """W11 primitive: per-point min/max across every frame for one nodal field."""
+        self._ensure_inner()
+        ids = [int(x) for x in point_ids]
+        if not ids:
+            return {}
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT src.source_node_label, MIN(ns.value), MAX(ns.value)
+                FROM h5_node_source src
+                JOIN node_scalar ns
+                  ON ns.ship_type=src.ship_type AND ns.scale=src.scale
+                 AND ns.zone_type=src.zone_type AND ns.node_id=src.node_id
+                WHERE src.ship_type=%s AND src.scale=%s AND src.zone_type=%s
+                  AND src.source_node_label = ANY(%s::bigint[])
+                  AND ns.var=%s
+                GROUP BY src.source_node_label
+                ORDER BY src.source_node_label
+                """,
+                (key.ship, key.scale, key.zone, ids, str(attribute_name).upper()),
+            )
+            return {
+                int(point_id): (float(vmin), float(vmax))
+                for point_id, vmin, vmax in cur.fetchall()
+            }
+        finally:
+            cur.close()
+
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
         self._ensure_inner()
         key = self._key

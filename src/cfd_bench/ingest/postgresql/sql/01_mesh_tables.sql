@@ -116,7 +116,9 @@ CREATE TABLE IF NOT EXISTS cell_scalar (
 CREATE INDEX IF NOT EXISTS idx_cell_scalar_lookup
 ON cell_scalar (ship_type, scale, zone_type, timestep, var, cell_id);
 
--- 8. node-centered 标量（由 cell_scalar 插值得到，用于等值面）
+-- 8. node-centered 标量
+--    Legacy CFD paths may derive/interpolate this table from cells; the H5
+--    ingest path stores genuine source nodal output here for W11.
 CREATE TABLE IF NOT EXISTS node_scalar (
     ship_type   VARCHAR(50) NOT NULL,
     scale       VARCHAR(50) NOT NULL,
@@ -130,6 +132,10 @@ CREATE TABLE IF NOT EXISTS node_scalar (
 
 CREATE INDEX IF NOT EXISTS idx_node_scalar_lookup
 ON node_scalar (ship_type, scale, zone_type, timestep, var, node_id);
+
+-- W11: one variable + a batch of point IDs across every frame.
+CREATE INDEX IF NOT EXISTS idx_node_scalar_var_node_frame
+ON node_scalar (ship_type, scale, zone_type, var, node_id, timestep);
 
 -- 9. node↔cell 关系（便于从 cell_scalar 聚合/插值得 node_scalar）
 CREATE TABLE IF NOT EXISTS node_cells (

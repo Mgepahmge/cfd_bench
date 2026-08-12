@@ -22,7 +22,7 @@ def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--duration", type=float, default=60.0)
     ap.add_argument("--steps", type=int, nargs="+", default=None, help="Override auto-discovered timesteps/frames")
-    ap.add_argument("--variables", nargs="+", default=None, help="Override auto-discovered scalar variables")
+    ap.add_argument("--variables", nargs="+", default=None, help="Override auto-discovered variables")
     ap.add_argument("--zone-fluid", default=None, help="Override auto-discovered fluid/result zone")
     ap.add_argument("--zone-hull", default="0_Wall_hull")
     ap.add_argument(

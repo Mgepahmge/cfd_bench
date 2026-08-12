@@ -1,4 +1,4 @@
-"""Orchestrate CFD-Bench workloads W1–W8."""
+"""Orchestrate CFD-Bench workloads W1–W11."""
 
 from __future__ import annotations
 
@@ -8,20 +8,21 @@ from typing import Iterable, Sequence, Set
 from cfd_bench.workloads.common.config import WorkloadConfig
 
 DEFAULT_WORKLOADS = ("w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8")
+H5_ONLY_WORKLOADS = ("w9", "w10", "w11")
 
 
 def run_workload(workload_id: str, cfg: WorkloadConfig, backends: Set[str]) -> None:
     mod = importlib.import_module(f"cfd_bench.workloads.{workload_id}.run")
     if hasattr(mod, "run_ship"):
         for ship in cfg.ships:
-            print(f"\n=== {workload_id.upper()} ship={ship} ===")
+            print(f"\n=== {workload_id.upper()} dataset={ship} ===")
             mod.run_ship(cfg, ship, backends)
     elif hasattr(mod, "run_ship_step"):
         for ship in cfg.ships:
             for step in cfg.valid_steps(ship):
                 if cfg.skip_step(ship, step):
                     continue
-                print(f"\n=== {workload_id.upper()} ship={ship} step={step} ===")
+                print(f"\n=== {workload_id.upper()} dataset={ship} step={step} ===")
                 mod.run_ship_step(cfg, ship, step, backends)
     else:
         raise RuntimeError(f"{workload_id}: missing run_ship/run_ship_step")
