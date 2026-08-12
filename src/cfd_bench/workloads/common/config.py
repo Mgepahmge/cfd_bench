@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from cfd_bench.core.paths import (
     resolve_max_range_dir,
@@ -27,14 +27,17 @@ class WorkloadConfig:
     vtk_hull_dir: str = field(default_factory=resolve_vtk_hull_dir)
     tiledb_root: str = field(default_factory=resolve_tiledb_root)
     max_range_dir: str = field(default_factory=resolve_max_range_dir)
+    steps: Optional[List[int]] = None
+    variables: List[str] = field(default_factory=lambda: list(VARIABLES))
     geom_engine: str = "db"
     zone_fluid: str = "0_Fluid"
     zone_hull: str = "0_Wall_hull"
 
     def valid_steps(self, ship: str) -> List[int]:
+        source = list(self.steps) if self.steps is not None else list(DEFAULT_STEPS)
         if ship in SHIPS_WITHOUT_STEP_2000:
-            return [s for s in DEFAULT_STEPS if s != 2000]
-        return list(DEFAULT_STEPS)
+            return [s for s in source if s != 2000]
+        return source
 
     def skip_step(self, ship: str, step: int) -> bool:
         return step == 2000 and ship in SHIPS_WITHOUT_STEP_2000

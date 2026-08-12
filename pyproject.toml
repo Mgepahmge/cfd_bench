@@ -15,10 +15,11 @@ dependencies = [
 
 [project.optional-dependencies]
 iotdb = ["apache-iotdb"]
-postgresql = ["psycopg2-binary", "scipy"]
+postgresql = ["psycopg2-binary", "scipy", "tqdm"]
 tiledb = ["tiledb"]
 vtk = ["vtk"]
-all = ["apache-iotdb", "psycopg2-binary", "scipy", "tiledb", "vtk"]
+h5 = ["h5py"]
+all = ["apache-iotdb", "psycopg2-binary", "scipy", "tqdm", "tiledb", "vtk", "h5py"]
 
 [project.scripts]
 cfd-bench = "cfd_bench.cli.main:main"

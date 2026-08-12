@@ -20,11 +20,11 @@ from cfd_bench.workloads.common.random_geom import (
 )
 
 
-def _run_point_queries(label, query_fn, scalar_fn, bounds, duration):
+def _run_point_queries(label, query_fn, scalar_fn, bounds, duration, variables):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(VARIABLES)
+        var = random.choice(variables)
         while True:
             pts = random_points_in_bbox(bounds)
             cells = query_fn(pts)
@@ -36,11 +36,11 @@ def _run_point_queries(label, query_fn, scalar_fn, bounds, duration):
     print(f"{label} point intersection: {txn} txns in {duration}s")
 
 
-def _run_line_queries(label, query_fn, scalar_fn, bounds, duration):
+def _run_line_queries(label, query_fn, scalar_fn, bounds, duration, variables):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(VARIABLES)
+        var = random.choice(variables)
         start, end = random_line_in_bbox(bounds)
         cells = query_fn(start, end)
         if len(cells) > 0:
@@ -49,11 +49,11 @@ def _run_line_queries(label, query_fn, scalar_fn, bounds, duration):
     print(f"{label} line intersection: {txn} txns in {duration}s")
 
 
-def _run_plane_queries(label, query_fn, scalar_fn, bounds, duration):
+def _run_plane_queries(label, query_fn, scalar_fn, bounds, duration, variables):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(VARIABLES)
+        var = random.choice(variables)
         origin, normal = random_plane_in_bbox(bounds)
         cells = query_fn(origin, normal)
         if len(cells) > 0:
@@ -84,9 +84,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def pg_scalar(cells, var):
                     return pg.point_query(cells, var)
 
-                _run_point_queries("PG", geom.point_intersection, pg_scalar, bounds, cfg.duration_sec)
-                _run_line_queries("PG", geom.line_intersection, pg_scalar, bounds, cfg.duration_sec)
-                _run_plane_queries("PG", geom.plane_intersection, pg_scalar, bounds, cfg.duration_sec)
+                _run_point_queries("PG", geom.point_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_line_queries("PG", geom.line_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_plane_queries("PG", geom.plane_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.variables)
             pg.close()
 
         if "iotdb" in backends:
@@ -100,9 +100,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def iotdb_scalar(cells, var):
                     return iotdb.point_query(cells, var)
 
-                _run_point_queries("IoTDB", geom.point_intersection, iotdb_scalar, bounds, cfg.duration_sec)
-                _run_line_queries("IoTDB", geom.line_intersection, iotdb_scalar, bounds, cfg.duration_sec)
-                _run_plane_queries("IoTDB", geom.plane_intersection, iotdb_scalar, bounds, cfg.duration_sec)
+                _run_point_queries("IoTDB", geom.point_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_line_queries("IoTDB", geom.line_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_plane_queries("IoTDB", geom.plane_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.variables)
             iotdb.close()
 
         if "tiledb" in backends:
@@ -116,9 +116,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def tdb_scalar(cells, var):
                     return tiledb.point_query(cells, var)
 
-                _run_point_queries("TileDB", geom.point_intersection, tdb_scalar, bounds, cfg.duration_sec)
-                _run_line_queries("TileDB", geom.line_intersection, tdb_scalar, bounds, cfg.duration_sec)
-                _run_plane_queries("TileDB", geom.plane_intersection, tdb_scalar, bounds, cfg.duration_sec)
+                _run_point_queries("TileDB", geom.point_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_line_queries("TileDB", geom.line_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_plane_queries("TileDB", geom.plane_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.variables)
             tiledb.close()
 
         if "vtk" in backends:
@@ -131,9 +131,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def vtk_scalar(cells, var):
                     return vtk.point_query(cells, var)
 
-                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec)
-                _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec)
-                _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec)
+                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.variables)
+                _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.variables)
             vtk.close()
 
 

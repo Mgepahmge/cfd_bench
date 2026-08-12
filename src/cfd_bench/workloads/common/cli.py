@@ -16,6 +16,10 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--ships", nargs="+", default=None)
     ap.add_argument("--duration", type=float, default=60.0)
+    ap.add_argument("--steps", type=int, nargs="+", default=None, help="Override dataset timesteps/frames")
+    ap.add_argument("--variables", nargs="+", default=None, help="Override W1/W2/W3/W8 scalar variables")
+    ap.add_argument("--zone-fluid", default="0_Fluid")
+    ap.add_argument("--zone-hull", default="0_Wall_hull")
     ap.add_argument(
         "--backend",
         nargs="+",
@@ -38,9 +42,13 @@ def workload_config_from_args(args, ships=None) -> WorkloadConfig:
     return WorkloadConfig(
         ships=args.ships or ships or WorkloadConfig().ships,
         duration_sec=args.duration,
+        steps=getattr(args, "steps", None),
+        variables=[str(v).upper() for v in (getattr(args, "variables", None) or WorkloadConfig().variables)],
         geom_engine=args.geom_engine,
         vtk_dir=args.vtk_dir,
         vtk_hull_dir=getattr(args, "vtk_hull_dir", resolve_vtk_hull_dir()),
         tiledb_root=args.tiledb_root,
         max_range_dir=getattr(args, "max_range_dir", resolve_max_range_dir()),
+        zone_fluid=getattr(args, "zone_fluid", "0_Fluid"),
+        zone_hull=getattr(args, "zone_hull", "0_Wall_hull"),
     )

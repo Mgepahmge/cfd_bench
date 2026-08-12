@@ -16,11 +16,11 @@ from cfd_bench.workloads.common.metrics import aggregation_w2
 from cfd_bench.workloads.common.random_geom import random_coord_range
 
 
-def _bench(label, coord_fn, scalar_fn, bounds, steps, duration):
+def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(VARIABLES)
+        var = random.choice(variables)
         while True:
             lo, hi = random_coord_range(bounds)
             cells = coord_fn(lo, hi)
@@ -50,7 +50,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 pg._sync_timestep(int(step))
                 return pg.point_query(cells, var).tolist()
 
-            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec)
+            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec, cfg.variables)
             shared_bounds = bounds
         pg.close()
 
@@ -64,7 +64,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 iotdb.ctx.step = step
                 return iotdb.point_query(cells, var).tolist()
 
-            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec)
+            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.variables)
         iotdb.close()
 
     if "tiledb" in backends:
@@ -77,7 +77,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 tiledb.ctx.step = step
                 return tiledb.point_query(cells, var).tolist()
 
-            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec)
+            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec, cfg.variables)
         tiledb.close()
 
     if "vtk" in backends:
@@ -92,7 +92,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 finally:
                     v.close()
 
-            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec)
+            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec, cfg.variables)
         vtk.close()
 
 

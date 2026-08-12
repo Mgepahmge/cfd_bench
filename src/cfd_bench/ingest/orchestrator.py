@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import List, Sequence, Tuple
 
 from cfd_bench.ingest.common.dat_files import dat_dir, iter_dat_files, topology_dat_file
-from cfd_bench.ingest.postgresql.pg_io import load_topology_from_dat, parse_ship_type_and_scale
 
 
 @dataclass
@@ -59,6 +58,7 @@ def _ingest_postgresql(
     build_pg_spatial: bool,
 ) -> None:
     from cfd_bench.ingest.postgresql.build_cell_geom_full import build_cell_geom_full
+    from cfd_bench.ingest.postgresql.pg_io import load_topology_from_dat
     from cfd_bench.ingest.postgresql.build_point_locator_grid import build_point_locator_grid
     from cfd_bench.ingest.postgresql.load_cell_vars import load_cell_vars
     from cfd_bench.ingest.postgresql.schema import apply_pg_schema
@@ -134,7 +134,10 @@ def ingest_all(
     if not os.path.isfile(dat_path) and not os.path.isdir(dat_path):
         raise FileNotFoundError(dat_path)
 
-    ship_type, scale = parse_ship_type_and_scale(ship, None)
+    if "_" in ship:
+        ship_type, scale = ship.split("_", 1)
+    else:
+        ship_type, scale = ship, "default"
     report = IngestReport()
     selected = _normalize_backends(backends)
     if include_vtk and "vtk" not in selected:

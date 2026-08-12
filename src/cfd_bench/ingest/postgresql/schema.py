@@ -12,6 +12,7 @@ _SQL_FILES = (
     "01_mesh_tables.sql",
     "02_spatial_tables.sql",
     "03_boundary_tables.sql",
+    "04_h5_metadata.sql",
 )
 
 

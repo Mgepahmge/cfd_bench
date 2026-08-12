@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from cfd_bench.cli.ingest_cmd import add_ingest_parser
+from cfd_bench.cli.h5_cmd import add_h5_parsers
 from cfd_bench.cli.run_cmd import add_run_parser
 
 
@@ -16,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = ap.add_subparsers(dest="command", required=True)
     add_ingest_parser(subparsers)
+    add_h5_parsers(subparsers)
     add_run_parser(subparsers)
     return ap
 

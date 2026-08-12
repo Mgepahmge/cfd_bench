@@ -27,11 +27,11 @@ def read_max_diffs(path: str) -> dict:
     return out
 
 
-def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, duration):
+def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, duration, variables):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(VARIABLES)
+        var = random.choice(variables)
         delta = max_diffs[var]
         cid = random.randint(0, max(0, n_cells - 1))
         iso_val = float(scalar_fn([cid], var)[0])
@@ -66,6 +66,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
+            cfg.variables,
         )
         pg.close()
 
@@ -82,6 +83,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
+            cfg.variables,
         )
         iotdb.close()
 
@@ -98,6 +100,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
+            cfg.variables,
         )
         tiledb.close()
 
@@ -113,6 +116,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
+            cfg.variables,
         )
         vtk.close()
 

@@ -21,11 +21,11 @@ def random_var_range_vtk(vtk_mesh, attribute_name: str):
     return lo, hi
 
 
-def _bench(label, range_fn, client, geom_client, duration, step):
+def _bench(label, range_fn, client, geom_client, duration, step, variables):
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(VARIABLES)
+        var = random.choice(variables)
         if geom_client is not None and hasattr(geom_client, "vtk_mesh") and geom_client.vtk_mesh is not None:
             lo, hi = random_var_range_vtk(geom_client.vtk_mesh, var)
         else:
@@ -46,6 +46,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             geom if uses_vtk_geom(cfg) else None,
             cfg.duration_sec,
             step,
+            cfg.variables,
         )
         pg.close()
 
@@ -59,6 +60,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             geom if uses_vtk_geom(cfg) else None,
             cfg.duration_sec,
             step,
+            cfg.variables,
         )
         iotdb.close()
 
@@ -72,6 +74,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             geom if uses_vtk_geom(cfg) else None,
             cfg.duration_sec,
             step,
+            cfg.variables,
         )
         tiledb.close()
 
@@ -84,6 +87,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             vtk,
             cfg.duration_sec,
             step,
+            cfg.variables,
         )
         vtk.close()
 

@@ -175,3 +175,49 @@ client.close()
 Download CFD Lifecycle Dataset (.dat files in `postprocessing/`) before ingest:
 
 https://www.scidb.cn/en/detail?dataSetId=3553563d222d41998d7ccdd2ceff1bf9
+
+## ODB-like HDF5 result ingest (PostgreSQL)
+
+The PostgreSQL path can also ingest ODB-like `.h5` result files whose mesh is stored under `Parts` and whose field output is stored under `Steps/<step>/Frames/<frame>`.
+
+```bash
+# Inspect only; no PostgreSQL dependency is required.
+cfd-bench inspect-h5 --h5 /path/to/result.h5
+
+# Parse the file and show the canonical mapping without writing the database.
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --dataset beam_static --dry-run
+
+# Load one instance into PostgreSQL.
+cfd-bench ingest-h5 \
+  --h5 /path/to/result.h5 \
+  --dataset beam_static \
+  --instance PART-1-1 \
+  --zone 0_Fluid
+```
+
+The loader assigns dense zero-based benchmark node/cell IDs, while preserving source FE labels and Step/Frame metadata in `h5_node_source`, `h5_cell_source`, and `h5_frame_metadata`. Nodal fields are averaged to cells; element/integration-point fields are reduced to one value per cell. A three-component source field (default `U`) is mapped to benchmark `U/V/W`. Exact scalar fields `P/K/E` are loaded only when present; missing physical quantities are **not fabricated**.
+
+Explicit mappings are supported when the source uses different field names/components:
+
+```bash
+cfd-bench ingest-h5 \
+  --h5 /path/to/result.h5 \
+  --dataset beam_static \
+  --map P=S.S11 \
+  --map E=E.E11
+```
+
+HDF5 frames are mapped to integer benchmark timesteps (`sequence` by default); the original Step/Frame, mode/increment, and time/frequency are preserved in `h5_frame_metadata`. The loader also writes W3 `*_max_diffs.csv` files unless `--no-max-diffs` is used.
+
+For HDF5 datasets, workloads can override the legacy CFD steps and variable list:
+
+```bash
+cfd-bench run \
+  --ships beam_static \
+  --backend postgresql \
+  --steps 0 \
+  --variables U V W E \
+  --max-range-dir ~/data/Max_Range
+```
+
+Install HDF5 support with `pip install 'cfd_bench[h5]'`; PostgreSQL loading additionally requires `pip install 'cfd_bench[postgresql]'`.

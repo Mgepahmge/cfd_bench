@@ -26,13 +26,24 @@ def _multipolygon_z_wkt(points: np.ndarray, simplices: np.ndarray) -> str:
     return "MULTIPOLYGON Z (" + ",".join(polys) + ")"
 
 
-def build_cell_geom_full(ship_type: str, scale: str, zone_type: str, batch_size: int = 500):
+def build_cell_geom_full(
+    ship_type: str,
+    scale: str,
+    zone_type: str,
+    batch_size: int = 500,
+    *,
+    db_name: str = "cae_data",
+    db_user: str = "postgres",
+    db_password: str = "123456",
+    db_host: str = "localhost",
+    db_port: str = "5432",
+):
     try:
         from scipy.spatial import ConvexHull
     except ImportError as e:
         raise RuntimeError("需要 scipy: pip install scipy") from e
 
-    conn = pg_connect()
+    conn = pg_connect(db_name, db_user, db_password, db_host, db_port)
     cur = conn.cursor()
     try:
         cur.execute(

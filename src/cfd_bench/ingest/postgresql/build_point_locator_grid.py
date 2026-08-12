@@ -12,8 +12,21 @@ from psycopg2.extras import execute_values
 from cfd_bench.ingest.postgresql.pg_io import parse_ship_type_and_scale, pg_connect
 
 
-def build_point_locator_grid(ship_type: str, scale: str, zone_type: str, nx: int = 80, ny: int = 80, nz: int = 40):
-    conn = pg_connect()
+def build_point_locator_grid(
+    ship_type: str,
+    scale: str,
+    zone_type: str,
+    nx: int = 80,
+    ny: int = 80,
+    nz: int = 40,
+    *,
+    db_name: str = "cae_data",
+    db_user: str = "postgres",
+    db_password: str = "123456",
+    db_host: str = "localhost",
+    db_port: str = "5432",
+):
+    conn = pg_connect(db_name, db_user, db_password, db_host, db_port)
     cur = conn.cursor()
     try:
         cur.execute(
