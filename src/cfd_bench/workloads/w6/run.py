@@ -49,17 +49,56 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root, zone=cfg.zone_hull)
-        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_hull)
-        n_cells = cell_count(geom)
-        sub = geom.extract_submesh(list(range(n_cells)))
+        # create temporary client
+        tiledb = make_tiledb(
+            ship,
+            step,
+            cfg.tiledb_root,
+            zone=cfg.zone_fluid,
+        )
+
+        # automatically detect hull zone
+        hull_zone = tiledb.resolve_hull_zone(
+            ship
+        )
+
+        # reconnect using hull zone
+        tiledb.close()
+
+        tiledb = make_tiledb(
+            ship,
+            step,
+            cfg.tiledb_root,
+            zone=hull_zone,
+        )
+
+        geom = make_geom_client(
+            cfg,
+            ship,
+            step,
+            tiledb,
+            hull_zone,
+        )
+
+        n_cells = cell_count(
+            geom
+        )
+
+        sub = geom.extract_submesh(
+            list(range(n_cells))
+        )
+
         _bench(
             "TileDB",
             lambda: geom.surface_norm(sub),
-            lambda c: tiledb.point_query(c, "P"),
+            lambda c: tiledb.point_query(
+                c,
+                "P"
+            ),
             n_cells,
             cfg.duration_sec,
         )
+
         tiledb.close()
 
     if "vtk" in backends:

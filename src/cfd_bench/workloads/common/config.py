@@ -14,7 +14,7 @@ from cfd_bench.core.paths import (
 
 
 DEFAULT_SHIPS = ["JBC_615k"]
-DEFAULT_STEPS = [200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000]
+DEFAULT_STEPS = [200, 400, 600]
 VARIABLES = ["U", "V", "W", "P", "K", "E"]
 SHIPS_WITHOUT_STEP_2000 = {"JBC_3843k", "Kvlcc2_3709k"}
 

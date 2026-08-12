@@ -92,59 +92,185 @@ def _face_plane_for_zone(zone: Zone_3D):
     return out
 
 
-def _export_boundary_faces(cursor, zone: Zone_3D, ship_type: str, scale: str, zone_type: str):
-    """Parse boundary faces from zone face connectivity and INSERT into boundary_face_geom table.
-
-    A boundary face is one where exactly one of LE[left_element] / RE[right_element] is negative
-    (i.e. the face has only one adjacent cell — it is on the domain boundary / hull surface).
+def _export_boundary_faces(
+    cursor,
+    zone: Zone_3D,
+    ship_type: str,
+    scale: str,
+    zone_type: str,
+):
     """
-    X, Y, Z = zone.Node_Coordinates[0], zone.Node_Coordinates[1], zone.Node_Coordinates[2]
-    LE, RE, FN = zone.LE, zone.RE, zone.FN
+    Parse boundary faces from zone face connectivity and
+    INSERT into boundary_face_geom table.
+
+    A boundary face is one where exactly one of LE/RE is valid.
+    Geometry is stored as PostGIS PolygonZ.
+    """
+
+    from psycopg2.extras import execute_values
+
+    X = zone.Node_Coordinates[0]
+    Y = zone.Node_Coordinates[1]
+    Z = zone.Node_Coordinates[2]
+
+    LE = zone.LE
+    RE = zone.RE
+    FN = zone.FN
 
     bf_rows = []
+
     for f in range(zone.Face_count):
-        le, re = int(LE[f]), int(RE[f])
-        # Boundary face: exactly one side is valid (>=0), the other is -1 (wall)
-        is_boundary = (le >= 0) != (re >= 0) and (le < 0 or re < 0)
+
+        le = int(LE[f])
+        re = int(RE[f])
+
+        # Boundary face:
+        # one valid adjacent cell and one invalid side
+        is_boundary = (le >= 0) != (re >= 0)
+
         if not is_boundary:
             continue
+
         node_ids = FN[f]
+
         if len(node_ids) < 3:
             continue
-        pts = np.array([[float(X[n]), float(Y[n]), float(Z[n])] for n in node_ids], dtype=np.float64)
+
+
+        pts = np.array(
+            [
+                [
+                    float(X[n]),
+                    float(Y[n]),
+                    float(Z[n]),
+                ]
+                for n in node_ids
+            ],
+            dtype=np.float64,
+        )
+
+
+        # Face center
         face_center = pts.mean(axis=0)
-        v0, v1 = pts[1] - pts[0], pts[2] - pts[0]
+
+
+        # Compute normal
+        v0 = pts[1] - pts[0]
+        v1 = pts[2] - pts[0]
+
         n = np.cross(v0, v1)
+
         nnorm = np.linalg.norm(n)
+
         if nnorm < 1e-15:
             continue
+
+
         n = n / nnorm
+
+
+        # Triangle area approximation
         area = float(max(1e-12, nnorm * 0.5))
-        cid = max(le, re)  # the valid cell adjacent to this boundary face
-        bf_rows.append((
-            ship_type, scale, zone_type,
-            int(cid),
-            area,
-            float(n[0]), float(n[1]), float(n[2]),
-            "ST_SetSRID(ST_GeomFromText('POINT Z("
-                f"{float(face_center[0]):.17g} {float(face_center[1]):.17g} {float(face_center[2]):.17g}"
-                ")',0),0)",
-            "default",
-        ))
+
+
+        # The valid adjacent cell
+        cid = max(le, re)
+
+
+        # IMPORTANT:
+        # only pass WKT string here.
+        # Do NOT pass:
+        # ST_SetSRID(ST_GeomFromText(...))
+        #
+        # because psycopg2 will quote it as text.
+        # Construct PolygonZ WKT
+        #
+        # PostGIS column:
+        # geometry(PolygonZ,0)
+        #
+        # Therefore geometry must be:
+        # POLYGON Z ((x y z, ...))
+
+        coords = []
+
+        for p in pts:
+            coords.append(
+                f"{float(p[0]):.17g} "
+                f"{float(p[1]):.17g} "
+                f"{float(p[2]):.17g}"
+            )
+
+        # close polygon ring
+        coords.append(coords[0])
+
+        geom_wkt = (
+                "POLYGON Z (("
+                + ", ".join(coords)
+                + "))"
+        )
+
+
+        bf_rows.append(
+            (
+                ship_type,
+                scale,
+                zone_type,
+                int(cid),
+                area,
+                float(n[0]),
+                float(n[1]),
+                float(n[2]),
+                geom_wkt,
+                "default",
+            )
+        )
+
 
     if not bf_rows:
         return
 
-    # Clear old data for this ship/scale/zone
+
+    # Remove previous data
     cursor.execute(
-        "DELETE FROM boundary_face_geom WHERE ship_type=%s AND scale=%s AND zone_type=%s",
-        (ship_type, scale, zone_type),
+        """
+        DELETE FROM boundary_face_geom
+        WHERE ship_type=%s
+          AND scale=%s
+          AND zone_type=%s
+        """,
+        (
+            ship_type,
+            scale,
+            zone_type,
+        ),
     )
-    _batch_insert(
+
+
+    # Correct PostGIS insertion
+    execute_values(
         cursor,
-        "boundary_face_geom",
-        ["ship_type", "scale", "zone_type", "cell_id", "area", "nx", "ny", "nz", "geom", "patch_name"],
+        """
+        INSERT INTO boundary_face_geom
+        (
+            ship_type,
+            scale,
+            zone_type,
+            cell_id,
+            area,
+            nx,
+            ny,
+            nz,
+            geom,
+            patch_name
+        )
+        VALUES %s
+        """,
         bf_rows,
+        template=(
+            "(%s,%s,%s,%s,%s,%s,%s,%s,"
+            "ST_SetSRID(ST_GeomFromText(%s,0),0),"
+            "%s)"
+        ),
     )
 
 

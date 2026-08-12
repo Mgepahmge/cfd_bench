@@ -62,9 +62,26 @@ def tiledb_mesh_static(root_path: str, key: DatasetKey, leaf: str) -> str:
     return os.path.join(tiledb_root(root_path, key), "mesh_static", key.zone, f"{leaf}.tdb")
 
 
-def tiledb_cell_vars(root_path: str, key: DatasetKey) -> str:
-    leaf = "cell_vars_hull.tdb" if key.zone in ("1_Hull", "hull") else "cell_vars.tdb"
-    return os.path.join(tiledb_root(root_path, key), "post_processing", f"step_{int(key.step)}", leaf)
+def tiledb_cell_vars(root_path, key):
+
+    zl = key.zone.lower()
+
+    if (
+        "hull" in zl
+        or "wall" in zl
+        or "symmetry" in zl
+    ):
+        leaf = "cell_vars_hull.tdb"
+    else:
+        leaf = "cell_vars.tdb"
+
+
+    return os.path.join(
+        tiledb_root(root_path,key),
+        "post_processing",
+        f"step_{int(key.step)}",
+        leaf
+    )
 
 
 def tiledb_derived(root_path: str, key: DatasetKey, leaf: str) -> str:

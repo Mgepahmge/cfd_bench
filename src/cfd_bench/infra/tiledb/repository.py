@@ -295,3 +295,41 @@ class TileDBRepository:
                 out.append((int(cid), qf))
         out.sort(key=lambda x: -x[1])
         return out
+
+    def list_mesh_static_zones(self, dataset_key: str):
+        """
+        List available mesh_static zones for a dataset.
+
+        Example:
+            mesh_static/
+                0_Fluid
+                0_Symmetry_sym
+                1_Hull
+        """
+
+        import os
+
+        root = os.path.join(
+            self.config.root_path,
+            dataset_key,
+            "mesh_static",
+        )
+
+        if not os.path.exists(root):
+            return []
+
+        zones = []
+
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+
+            if not os.path.isdir(path):
+                continue
+
+            # must contain cells.tdb
+            if os.path.exists(
+                    os.path.join(path, "cells.tdb")
+            ):
+                zones.append(name)
+
+        return sorted(zones)

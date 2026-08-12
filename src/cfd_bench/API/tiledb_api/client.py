@@ -177,3 +177,52 @@ class TileDBMeshClient(AbstractContextManager):
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
         return self.repo.fetch_qcriterion_by_roi(ctx.dataset_key, ts, tau, roi_bounds, zone=ctx.zone)
+
+    def resolve_hull_zone(self, dataset_key: str):
+        """
+        Automatically find hull-like mesh zone.
+
+        Priority:
+            1. name contains hull
+            2. name contains wall
+            3. name contains symmetry
+            4. any non-fluid zone
+        """
+
+        zones = self.repo.list_mesh_static_zones(dataset_key)
+
+        if not zones:
+            raise FileNotFoundError(
+                f"No mesh_static zones found for {dataset_key}"
+            )
+
+        # 1. explicit hull
+        for z in zones:
+            zl = z.lower()
+
+            if "hull" in zl:
+                return z
+
+        # 2. wall
+        for z in zones:
+            zl = z.lower()
+
+            if "wall" in zl:
+                return z
+
+        # 3. symmetry
+        for z in zones:
+            zl = z.lower()
+
+            if "symmetry" in zl:
+                return z
+
+        # fallback:
+        # choose non-fluid
+        for z in zones:
+            if "fluid" not in z.lower():
+                return z
+
+        raise RuntimeError(
+            f"Cannot identify hull zone from {zones}"
+        )

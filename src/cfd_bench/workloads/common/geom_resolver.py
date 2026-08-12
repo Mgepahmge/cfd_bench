@@ -43,14 +43,61 @@ def mesh_bounds(
     return None
 
 
-def cell_count(geom_client: Any) -> int:
-    if hasattr(geom_client, "runtime") and hasattr(geom_client, "ctx") and geom_client.ctx is not None:
-        data = geom_client.runtime.ensure_cells(geom_client.ctx.dataset_key, geom_client.ctx.zone)
-        return len(data.cells)
+def cell_count(geom_client):
+    """
+    Get number of cells from different geometry backends.
+
+    IoTDB/TileDB:
+        runtime.ensure_cells(dataset_key, zone)
+
+    PostgreSQL:
+        runtime.ensure_cells()
+    """
+
+    if (
+        hasattr(geom_client, "runtime")
+        and geom_client.runtime is not None
+    ):
+
+        runtime = geom_client.runtime
+
+        try:
+            # IoTDB / TileDB style
+            if (
+                hasattr(geom_client, "ctx")
+                and geom_client.ctx is not None
+            ):
+                try:
+                    data = runtime.ensure_cells(
+                        geom_client.ctx.dataset_key,
+                        geom_client.ctx.zone,
+                    )
+                    return len(data.cells)
+
+                except TypeError:
+                    # PostgreSQL style
+                    data = runtime.ensure_cells()
+                    return len(data.cells)
+
+        except Exception:
+            pass
+
+
     if hasattr(geom_client, "get_cell_count"):
-        return int(geom_client.get_cell_count())
-    if hasattr(geom_client, "vtk_mesh") and geom_client.vtk_mesh is not None:
-        return int(geom_client.vtk_mesh.GetNumberOfCells())
+        return int(
+            geom_client.get_cell_count()
+        )
+
+
+    if (
+        hasattr(geom_client, "vtk_mesh")
+        and geom_client.vtk_mesh is not None
+    ):
+        return int(
+            geom_client.vtk_mesh.GetNumberOfCells()
+        )
+
+
     return 0
 
 
