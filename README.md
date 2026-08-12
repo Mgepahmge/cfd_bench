@@ -178,46 +178,40 @@ https://www.scidb.cn/en/detail?dataSetId=3553563d222d41998d7ccdd2ceff1bf9
 
 ## ODB-like HDF5 result ingest (PostgreSQL)
 
-The PostgreSQL path can also ingest ODB-like `.h5` result files whose mesh is stored under `Parts` and whose field output is stored under `Steps/<step>/Frames/<frame>`.
+The PostgreSQL HDF5 path is metadata-driven. For the normal single-instance case, the minimal workflow is:
 
 ```bash
-# Inspect only; no PostgreSQL dependency is required.
+# Optional inspection only.
 cfd-bench inspect-h5 --h5 /path/to/result.h5
 
-# Parse the file and show the canonical mapping without writing the database.
-cfd-bench ingest-h5 --h5 /path/to/result.h5 --dataset beam_static --dry-run
+# Dataset key, instance, steps, vector field and P/K/E mappings are inferred when unambiguous.
+cfd-bench ingest-h5 --h5 /path/to/result.h5
 
-# Load one instance into PostgreSQL.
-cfd-bench ingest-h5 \
-  --h5 /path/to/result.h5 \
-  --dataset beam_static \
-  --instance PART-1-1 \
-  --zone 0_Fluid
+# PostgreSQL is now the default backend. Dataset(s), zone, timesteps and common variables
+# are discovered directly from PostgreSQL.
+cfd-bench run
 ```
 
-The loader assigns dense zero-based benchmark node/cell IDs, while preserving source FE labels and Step/Frame metadata in `h5_node_source`, `h5_cell_source`, and `h5_frame_metadata`. Nodal fields are averaged to cells; element/integration-point fields are reduced to one value per cell. A three-component source field (default `U`) is mapped to benchmark `U/V/W`. Exact scalar fields `P/K/E` are loaded only when present; missing physical quantities are **not fabricated**.
+The dataset key defaults to a sanitized form of the `.h5` filename. `--dataset`, `--instance`, `--steps`, `--vector-field`, `--scalar-fields`, `--map`, `--zone-fluid`, `--variables`, etc. remain available as **overrides** when the source is genuinely ambiguous; they are no longer required for ordinary files. Explicit `--map` entries augment the inferred mapping instead of replacing it, so for example `--map P=S.S11` keeps automatically discovered U/V/W/E.
 
-Explicit mappings are supported when the source uses different field names/components:
+The loader assigns dense zero-based benchmark node/cell IDs while preserving source FE labels and Step/Frame metadata in `h5_node_source`, `h5_cell_source`, and `h5_frame_metadata`. Nodal fields are averaged to cells; element/integration-point fields are reduced to one value per cell. A recognizable three-component displacement/velocity field is mapped to benchmark U/V/W. Exact P/K/E field names are loaded when present; unknown physical quantities are not silently invented.
+
+### W3 max-diff metadata
+
+New HDF5 ingests materialize W3 search widths in PostgreSQL table `benchmark_max_diff`. PostgreSQL W3 reads this table directly and, for databases ingested by an older version, can compute the values from `cell_scalar` + `cell_adjacency` on demand. Therefore PostgreSQL W3 no longer depends on `~/data/Max_Range` or any other machine-specific sidecar directory. CSV max-diff files are still exported by default only for backward compatibility with the non-PostgreSQL backends.
+
+### PostgreSQL connection settings
+
+The same environment variables are used by both ingest and run:
 
 ```bash
-cfd-bench ingest-h5 \
-  --h5 /path/to/result.h5 \
-  --dataset beam_static \
-  --map P=S.S11 \
-  --map E=E.E11
+export CFD_BENCH_PG_DB_NAME=cae_data
+export CFD_BENCH_PG_USER=postgres
+export CFD_BENCH_PG_PASSWORD=...
+export CFD_BENCH_PG_HOST=localhost
+export CFD_BENCH_PG_PORT=5432
 ```
 
-HDF5 frames are mapped to integer benchmark timesteps (`sequence` by default); the original Step/Frame, mode/increment, and time/frequency are preserved in `h5_frame_metadata`. The loader also writes W3 `*_max_diffs.csv` files unless `--no-max-diffs` is used.
-
-For HDF5 datasets, workloads can override the legacy CFD steps and variable list:
-
-```bash
-cfd-bench run \
-  --ships beam_static \
-  --backend postgresql \
-  --steps 0 \
-  --variables U V W E \
-  --max-range-dir ~/data/Max_Range
-```
+The legacy `--db-*` options on `ingest-h5` remain available as one-command overrides.
 
 Install HDF5 support with `pip install 'cfd_bench[h5]'`; PostgreSQL loading additionally requires `pip install 'cfd_bench[postgresql]'`.

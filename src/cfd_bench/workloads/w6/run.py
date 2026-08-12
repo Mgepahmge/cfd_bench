@@ -54,7 +54,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             ship,
             step,
             cfg.tiledb_root,
-            zone=cfg.zone_fluid,
+            zone=cfg.fluid_zone(ship),
         )
 
         # automatically detect hull zone

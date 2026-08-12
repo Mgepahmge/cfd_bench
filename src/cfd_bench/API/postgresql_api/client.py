@@ -115,6 +115,77 @@ class PostgreSQLMeshClient:
         key = self._key
         return pg_spatial.fetch_cell_count(self._inner.conn, key.ship, key.scale, key.zone)
 
+    def get_max_diffs(self, step: Optional[int] = None) -> Dict[str, float]:
+        """Return W3 search widths from PostgreSQL, never from a sidecar path.
+
+        New H5 ingests materialize ``benchmark_max_diff``.  For databases
+        created by older versions, the method computes the same values from
+        ``cell_scalar`` + ``cell_adjacency`` and finally falls back to the
+        variable range for meshes without usable adjacency.
+        """
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        conn = self._inner.conn
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT to_regclass('public.benchmark_max_diff')")
+            if cur.fetchone()[0] is not None:
+                cur.execute(
+                    """
+                    SELECT var, max_diff
+                    FROM benchmark_max_diff
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s AND timestep=%s
+                    """,
+                    (key.ship, key.scale, key.zone, ts),
+                )
+                rows = cur.fetchall()
+                if rows:
+                    return {str(var).upper(): float(value) for var, value in rows}
+
+            cur.execute(
+                """
+                SELECT a.var, MAX(ABS(a.value - b.value))
+                FROM cell_scalar a
+                JOIN cell_adjacency adj
+                  ON adj.ship_type=a.ship_type AND adj.scale=a.scale
+                 AND adj.zone_type=a.zone_type AND adj.cell_id=a.cell_id
+                CROSS JOIN LATERAL unnest(adj.neighbor_ids) AS n(cell_id)
+                JOIN cell_scalar b
+                  ON b.ship_type=a.ship_type AND b.scale=a.scale
+                 AND b.zone_type=a.zone_type AND b.timestep=a.timestep
+                 AND b.var=a.var AND b.cell_id=n.cell_id
+                WHERE a.ship_type=%s AND a.scale=%s AND a.zone_type=%s
+                  AND a.timestep=%s
+                GROUP BY a.var
+                """,
+                (key.ship, key.scale, key.zone, ts),
+            )
+            result = {
+                str(var).upper(): float(value)
+                for var, value in cur.fetchall()
+                if value is not None
+            }
+            if result:
+                return result
+
+            cur.execute(
+                """
+                SELECT var, MAX(value) - MIN(value)
+                FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s AND timestep=%s
+                GROUP BY var
+                """,
+                (key.ship, key.scale, key.zone, ts),
+            )
+            return {
+                str(var).upper(): float(value or 0.0)
+                for var, value in cur.fetchall()
+            }
+        finally:
+            cur.close()
+
     def var_value_range(self, attribute_name: str, step: Optional[int] = None) -> Tuple[float, float]:
         self._ensure_inner()
         ctx = self._require_ctx()

@@ -37,8 +37,8 @@ def _bench(label, range_fn, client, geom_client, duration, step, variables):
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
     if "postgresql" in backends:
-        pg = make_pg(ship, step, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
+        pg = make_pg(ship, step, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, pg, cfg.fluid_zone(ship))
         _bench(
             "PG",
             lambda lo, hi, v: pg.range_query_var(lo, hi, v),
@@ -46,13 +46,13 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             geom if uses_vtk_geom(cfg) else None,
             cfg.duration_sec,
             step,
-            cfg.variables,
+            cfg.valid_variables(ship),
         )
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+        iotdb = make_iotdb(ship, step, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.fluid_zone(ship))
         _bench(
             "IoTDB",
             lambda lo, hi, v: iotdb.range_query_var(lo, hi, v),
@@ -60,13 +60,13 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             geom if uses_vtk_geom(cfg) else None,
             cfg.duration_sec,
             step,
-            cfg.variables,
+            cfg.valid_variables(ship),
         )
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.fluid_zone(ship))
         _bench(
             "TileDB",
             lambda lo, hi, v: tiledb.range_query_var(lo, hi, v),
@@ -74,12 +74,12 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             geom if uses_vtk_geom(cfg) else None,
             cfg.duration_sec,
             step,
-            cfg.variables,
+            cfg.valid_variables(ship),
         )
         tiledb.close()
 
     if "vtk" in backends:
-        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
         _bench(
             "VTK",
             lambda lo, hi, v: vtk.range_query_var(lo, hi, v),
@@ -87,7 +87,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             vtk,
             cfg.duration_sec,
             step,
-            cfg.variables,
+            cfg.valid_variables(ship),
         )
         vtk.close()
 

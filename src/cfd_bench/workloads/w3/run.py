@@ -8,30 +8,46 @@ import os
 import random
 import time
 
-import numpy as np
-
 from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
-from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
+from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import cell_count, make_geom_client
 
 
 def read_max_diffs(path: str) -> dict:
     out = {}
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         next(reader, None)
         for row in reader:
             if len(row) == 2:
-                out[row[0]] = float(row[1])
+                out[str(row[0]).upper()] = float(row[1])
     return out
 
 
+def _find_max_diff_file(directory: str, ship: str, step: int):
+    """Backward-compatible sidecar lookup for non-PostgreSQL backends."""
+    if not directory or not os.path.isdir(directory):
+        return None
+    suffix = f"_{step}_max_diffs.csv"
+    exact = os.path.join(directory, f"{ship}{suffix}")
+    if os.path.isfile(exact):
+        return exact
+    for name in os.listdir(directory):
+        if ship in name and name.endswith(suffix):
+            return os.path.join(directory, name)
+    return None
+
+
 def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, duration, variables):
+    usable = [str(v).upper() for v in variables if str(v).upper() in max_diffs]
+    if not usable:
+        print(f"{label} W3: skip (no variables with max-diff metadata)")
+        return
     txn = 0
     t0 = time.time()
     while time.time() - t0 < duration:
-        var = random.choice(variables)
+        var = random.choice(usable)
         delta = max_diffs[var]
         cid = random.randint(0, max(0, n_cells - 1))
         iso_val = float(scalar_fn([cid], var)[0])
@@ -43,36 +59,47 @@ def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, d
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
-    delta_file = None
-    for f in os.listdir(cfg.max_range_dir):
-        if ship in f and f.endswith(f"_{step}_max_diffs.csv"):
-            delta_file = os.path.join(cfg.max_range_dir, f)
-            break
-    if delta_file is None:
-        print(f"no max_diffs for {ship} step {step}, skip")
-        return
-    max_diffs = read_max_diffs(delta_file)
+    variables = cfg.valid_variables(ship)
 
+    # PostgreSQL is self-contained: max-diff metadata is materialized during
+    # ingest and can also be recomputed from DB rows for older databases.
     if "postgresql" in backends:
-        pg = make_pg(ship, step, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
-        n_cells = cell_count(geom)
-        _bench(
-            "PG",
-            lambda c, v: pg.point_query(c, v),
-            lambda lo, hi, v: pg.range_query_var(lo, hi, v),
-            lambda cells: geom.extract_submesh(cells),
-            lambda mesh, v, val: geom.isosurface_extraction(v, val) if mesh else None,
-            n_cells,
-            max_diffs,
-            cfg.duration_sec,
-            cfg.variables,
-        )
-        pg.close()
+        pg = make_pg(ship, step, cfg.fluid_zone(ship))
+        try:
+            max_diffs = pg.get_max_diffs(step)
+            geom = make_geom_client(cfg, ship, step, pg, cfg.fluid_zone(ship))
+            n_cells = cell_count(geom)
+            _bench(
+                "PG",
+                lambda c, v: pg.point_query(c, v),
+                lambda lo, hi, v: pg.range_query_var(lo, hi, v),
+                lambda cells: geom.extract_submesh(cells),
+                lambda mesh, v, val: geom.isosurface_extraction(v, val) if mesh else None,
+                n_cells,
+                max_diffs,
+                cfg.duration_sec,
+                variables,
+            )
+        finally:
+            pg.close()
 
-    if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
+    # Legacy sidecar files remain supported for IoTDB/TileDB/VTK, but a
+    # missing directory is now a clean skip instead of FileNotFoundError.
+    other_backends = backends.intersection({"iotdb", "tiledb", "vtk"})
+    max_diffs = None
+    if other_backends:
+        delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
+        if delta_file is None:
+            print(
+                f"W3: no sidecar max_diffs for {ship} step {step}; "
+                f"skip {', '.join(sorted(other_backends))}"
+            )
+        else:
+            max_diffs = read_max_diffs(delta_file)
+
+    if "iotdb" in backends and max_diffs is not None:
+        iotdb = make_iotdb(ship, step, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.fluid_zone(ship))
         n_cells = cell_count(geom)
         _bench(
             "IoTDB",
@@ -83,13 +110,13 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
-            cfg.variables,
+            variables,
         )
         iotdb.close()
 
-    if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
+    if "tiledb" in backends and max_diffs is not None:
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.fluid_zone(ship))
         n_cells = cell_count(geom)
         _bench(
             "TileDB",
@@ -100,12 +127,12 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
-            cfg.variables,
+            variables,
         )
         tiledb.close()
 
-    if "vtk" in backends:
-        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
+    if "vtk" in backends and max_diffs is not None:
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
         n_cells = cell_count(vtk)
         _bench(
             "VTK",
@@ -116,7 +143,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             n_cells,
             max_diffs,
             cfg.duration_sec,
-            cfg.variables,
+            variables,
         )
         vtk.close()
 

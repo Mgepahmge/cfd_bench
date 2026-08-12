@@ -38,9 +38,9 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
     shared_bounds = None
 
     if "postgresql" in backends:
-        pg = make_pg(ship, step, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_fluid)
-        bounds = mesh_bounds(cfg, ship, step, pg, geom, cfg.zone_fluid)
+        pg = make_pg(ship, step, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, pg, cfg.fluid_zone(ship))
+        bounds = mesh_bounds(cfg, ship, step, pg, geom, cfg.fluid_zone(ship))
         if bounds:
 
             def pg_scalar(cid):
@@ -55,9 +55,9 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         pg.close()
 
     if "iotdb" in backends:
-        iotdb = make_iotdb(ship, step, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, iotdb, cfg.zone_fluid)
-        bounds = mesh_bounds(cfg, ship, step, iotdb, geom, cfg.zone_fluid) or shared_bounds
+        iotdb = make_iotdb(ship, step, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, iotdb, cfg.fluid_zone(ship))
+        bounds = mesh_bounds(cfg, ship, step, iotdb, geom, cfg.fluid_zone(ship)) or shared_bounds
         if bounds:
 
             def iot_scalar(cid):
@@ -71,9 +71,9 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         iotdb.close()
 
     if "tiledb" in backends:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.zone_fluid)
-        geom = make_geom_client(cfg, ship, step, tiledb, cfg.zone_fluid)
-        bounds = mesh_bounds(cfg, ship, step, tiledb, geom, cfg.zone_fluid) or shared_bounds
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship))
+        geom = make_geom_client(cfg, ship, step, tiledb, cfg.fluid_zone(ship))
+        bounds = mesh_bounds(cfg, ship, step, tiledb, geom, cfg.fluid_zone(ship)) or shared_bounds
         if bounds:
 
             def tdb_scalar(cid):
@@ -87,8 +87,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         tiledb.close()
 
     if "vtk" in backends:
-        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.zone_fluid)
-        bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.zone_fluid) or shared_bounds
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
+        bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.fluid_zone(ship)) or shared_bounds
         if bounds:
 
             def vtk_scalar(cid):

@@ -13,6 +13,7 @@ _SQL_FILES = (
     "02_spatial_tables.sql",
     "03_boundary_tables.sql",
     "04_h5_metadata.sql",
+    "05_benchmark_runtime.sql",
 )
 
 

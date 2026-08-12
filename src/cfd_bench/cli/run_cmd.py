@@ -9,7 +9,7 @@ from cfd_bench.workloads.runner import DEFAULT_WORKLOADS, run_all
 
 
 def add_run_parser(subparsers: argparse._SubParsersAction) -> None:
-    ap = subparsers.add_parser("run", help="Run CFD-Bench workloads W1–W8")
+    ap = subparsers.add_parser("run", help="Run CFD-Bench workloads W1-W8")
     ap.add_argument(
         "--workloads",
         nargs="+",
@@ -17,19 +17,23 @@ def add_run_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Workloads to run (default: w1..w8)",
     )
     add_common_workload_args(ap)
+    # H5 expansion is PostgreSQL-first.  Other backends remain opt-in and all
+    # legacy arguments are still available as overrides.
     ap.set_defaults(
-        backend=["postgresql", "iotdb", "tiledb"],
+        backend=["postgresql"],
         func=run_run,
     )
-    for action in ap._actions:
-        if action.dest == "ships":
-            action.required = True
-            action.help = "Ship dataset keys (required, e.g. JBC_615k)"
-            break
 
 
 def run_run(args: argparse.Namespace) -> int:
     cfg = workload_config_from_args(args)
     backends = set(args.backend)
+    print("Runtime configuration:")
+    print(f"  backends={sorted(backends)} datasets={cfg.ships}")
+    for ship in cfg.ships:
+        print(
+            f"  {ship}: zone={cfg.fluid_zone(ship)} "
+            f"steps={cfg.valid_steps(ship)} vars={cfg.valid_variables(ship)}"
+        )
     run_all(cfg, backends, workloads=args.workloads)
     return 0
