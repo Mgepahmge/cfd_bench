@@ -12,7 +12,12 @@ from cfd_bench.ingest.orchestrator import ingest_all
 def add_ingest_parser(subparsers: argparse._SubParsersAction) -> None:
     ap = subparsers.add_parser("ingest", help="Load CFD data into storage backends")
     ap.add_argument("--dat", required=True, help="Path to a .dat file or directory of .dat files")
-    ap.add_argument("--ship", required=True, help="Dataset key, e.g. JBC_615k")
+    ap.add_argument(
+        "--datasets",
+        required=True,
+        metavar="DATASET",
+        help="Dataset key, e.g. JBC_615k",
+    )
     ap.add_argument(
         "--backends",
         nargs="+",
@@ -62,7 +67,7 @@ def add_ingest_parser(subparsers: argparse._SubParsersAction) -> None:
 def run_ingest(args: argparse.Namespace) -> int:
     report = ingest_all(
         args.dat,
-        args.ship,
+        args.datasets,
         args.backends,
         zone_indices=args.zone_indices,
         tiledb_root=args.tiledb_root,

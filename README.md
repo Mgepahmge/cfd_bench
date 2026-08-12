@@ -8,17 +8,17 @@ CFD-Bench: A CFD-driven benchmark for scientific data processing using database 
 pip install -e ".[all]"
 
 # One-shot ingest (PG + IoTDB + TileDB) — pass a .dat file or Postprocessing directory
-cfd-bench ingest --dat /path/to/JBC_615k/Postprocessing --ship JBC_615k
+cfd-bench ingest --dat /path/to/JBC_615k/Postprocessing --datasets JBC_615k
 
 # One-shot run all workloads W1–W8
-cfd-bench run --ships JBC_615k --geom-engine db
+cfd-bench run --datasets JBC_615k --geom-engine db
 ```
 
 Development mode without install:
 
 ```bash
-PYTHONPATH=src python -m cfd_bench.cli ingest --dat /path/to/Postprocessing --ship JBC_615k
-PYTHONPATH=src python -m cfd_bench.cli run --ships JBC_615k --geom-engine db
+PYTHONPATH=src python -m cfd_bench.cli ingest --dat /path/to/Postprocessing --datasets JBC_615k
+PYTHONPATH=src python -m cfd_bench.cli run --datasets JBC_615k --geom-engine db
 ```
 
 ## Architecture
@@ -89,16 +89,16 @@ Modern ingest writes three logical domains:
 
 ```bash
 # Full postprocessing directory (recommended — loads all timesteps)
-cfd-bench ingest --dat /path/to/JBC_615k/Postprocessing --ship JBC_615k
+cfd-bench ingest --dat /path/to/JBC_615k/Postprocessing --datasets JBC_615k
 
 # Selected backends only
-cfd-bench ingest --dat /path/to/Postprocessing --ship JBC_615k --backends tiledb iotdb
+cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --backends tiledb iotdb
 
 # Skip PG DDL on re-run
-cfd-bench ingest --dat /path/to/Postprocessing --ship JBC_615k --backends postgresql --no-init-pg-schema
+cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --backends postgresql --no-init-pg-schema
 
 # Optional VTK baseline export (--geom-engine vtk)
-cfd-bench ingest --dat /path/to/Postprocessing --ship JBC_615k --include-vtk
+cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --include-vtk
 ```
 
 **PostgreSQL**: DDL → topology → cell_vars (all `.dat` in directory) → PostGIS layers. Requires **PostgreSQL + PostGIS** and `scipy`.
@@ -140,16 +140,16 @@ PYTHONPATH=src python -m cfd_bench.ingest.tiledb.load_cell_vars --dat_dir /path/
 | `vtk` | `--geom-engine vtk` | Geometry via VTK files; baseline comparison. |
 
 ```bash
-cfd-bench run --ships JBC_615k --geom-engine db
-cfd-bench run --workloads w1 w2 --ships JBC_615k --backend iotdb --duration 10
-cfd-bench run --ships JBC_615k --backend vtk --geom-engine vtk
+cfd-bench run --datasets JBC_615k --geom-engine db
+cfd-bench run --workloads w1 w2 --datasets JBC_615k --backend iotdb --duration 10
+cfd-bench run --datasets JBC_615k --backend vtk --geom-engine vtk
 ```
 
 ### Single workload (developer path)
 
 ```bash
 PYTHONPATH=src python -m cfd_bench.workloads.w1.run \
-  --ships JBC_615k --backend postgresql iotdb --geom-engine db
+  --datasets JBC_615k --backend postgresql iotdb --geom-engine db
 ```
 
 ## API usage
@@ -184,15 +184,15 @@ The PostgreSQL HDF5 path is metadata-driven. For the normal single-instance case
 # Optional inspection only.
 cfd-bench inspect-h5 --h5 /path/to/result.h5
 
-# Dataset key, instance, steps, vector field and P/K/E mappings are inferred when unambiguous.
-cfd-bench ingest-h5 --h5 /path/to/result.h5
+# Dataset identity is explicit; H5 layout details are inferred when unambiguous.
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static
 
-# PostgreSQL is now the default backend. Dataset(s), zone, timesteps and common variables
-# are discovered directly from PostgreSQL.
-cfd-bench run
+# PostgreSQL is the default backend. Dataset identity stays explicit, while zone,
+# timesteps and common variables are discovered directly from PostgreSQL.
+cfd-bench run --datasets beam_static
 ```
 
-The dataset key defaults to a sanitized form of the `.h5` filename. `--dataset`, `--instance`, `--steps`, `--vector-field`, `--scalar-fields`, `--map`, `--zone-fluid`, `--variables`, etc. remain available as **overrides** when the source is genuinely ambiguous; they are no longer required for ordinary files. Explicit `--map` entries augment the inferred mapping instead of replacing it, so for example `--map P=S.S11` keeps automatically discovered U/V/W/E.
+The dataset key is explicit and required via `--datasets`. `--instance`, `--steps`, `--vector-field`, `--scalar-fields`, `--map`, `--zone-fluid`, `--variables`, etc. remain available as **overrides** when the source is genuinely ambiguous; they are not required for ordinary unambiguous files. Explicit `--map` entries augment the inferred mapping instead of replacing it, so for example `--map P=S.S11` keeps automatically discovered U/V/W/E.
 
 The loader assigns dense zero-based benchmark node/cell IDs while preserving source FE labels and Step/Frame metadata in `h5_node_source`, `h5_cell_source`, and `h5_frame_metadata`. Nodal fields are averaged to cells; element/integration-point fields are reduced to one value per cell. A recognizable three-component displacement/velocity field is mapped to benchmark U/V/W. Exact P/K/E field names are loaded when present; unknown physical quantities are not silently invented.
 

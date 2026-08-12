@@ -14,7 +14,12 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 
 
 def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--ships", nargs="+", default=None, help="Dataset keys; PostgreSQL can auto-discover when omitted")
+    ap.add_argument(
+        "--datasets",
+        nargs="+",
+        required=True,
+        help="Dataset key(s) to benchmark, e.g. JBC_615k beam_static",
+    )
     ap.add_argument("--duration", type=float, default=60.0)
     ap.add_argument("--steps", type=int, nargs="+", default=None, help="Override auto-discovered timesteps/frames")
     ap.add_argument("--variables", nargs="+", default=None, help="Override auto-discovered scalar variables")
@@ -42,8 +47,8 @@ def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def workload_config_from_args(args, ships=None) -> WorkloadConfig:
-    requested_ships = list(args.ships or ships or [])
+def workload_config_from_args(args, datasets=None, ships=None) -> WorkloadConfig:
+    requested_ships = list(args.datasets or datasets or ships or [])
     explicit_steps = getattr(args, "steps", None)
     explicit_variables = getattr(args, "variables", None)
     explicit_zone = getattr(args, "zone_fluid", None)
@@ -54,8 +59,7 @@ def workload_config_from_args(args, ships=None) -> WorkloadConfig:
     discovered_zones = {}
 
     needs_pg_discovery = "postgresql" in backends and (
-        not requested_ships
-        or explicit_steps is None
+        explicit_steps is None
         or explicit_variables is None
         or explicit_zone is None
     )
@@ -65,31 +69,17 @@ def workload_config_from_args(args, ships=None) -> WorkloadConfig:
 
             infos = discover_postgresql_datasets(
                 preferred_zone=explicit_zone,
-                selected_datasets=requested_ships or None,
+                selected_datasets=requested_ships,
             )
         except Exception:
-            # Explicit dataset users retain legacy behavior if metadata cannot
-            # be queried.  A PostgreSQL-only parameter-free run, however,
-            # cannot guess a dataset and should fail with the original error.
-            if not requested_ships and backends == {"postgresql"}:
-                raise
+            # Dataset identity is always explicit.  If metadata discovery is
+            # unavailable, retain the legacy fallback for steps/variables/zone.
             infos = []
 
-        if not requested_ships and infos:
-            requested_ships = [info.dataset_key for info in infos]
         for info in infos:
             discovered_steps[info.dataset_key] = list(info.timesteps)
             discovered_variables[info.dataset_key] = list(info.variables)
             discovered_zones[info.dataset_key] = info.zone_type
-
-        if not requested_ships and backends == {"postgresql"}:
-            raise RuntimeError(
-                "No runnable PostgreSQL datasets were found in cell_scalar. "
-                "Ingest an H5 dataset first or pass --ships explicitly."
-            )
-
-    if not requested_ships:
-        requested_ships = list(WorkloadConfig().ships)
 
     return WorkloadConfig(
         ships=requested_ships,
