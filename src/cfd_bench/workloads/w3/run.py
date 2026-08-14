@@ -83,36 +83,45 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         finally:
             pg.close()
 
-    # Legacy sidecar files remain supported for IoTDB/TileDB/VTK, but a
-    # missing directory is now a clean skip instead of FileNotFoundError.
-    other_backends = backends.intersection({"iotdb", "tiledb", "vtk"})
+    # H5 IoTDB ingest materializes max-diff metadata in IoTDB, matching the
+    # self-contained PostgreSQL path.  Legacy TileDB/VTK still use sidecars.
+    if "iotdb" in backends:
+        iotdb = make_iotdb(ship, step, cfg.fluid_zone(ship))
+        try:
+            max_diffs_iot = iotdb.get_max_diffs(step)
+            if not max_diffs_iot:
+                # Preserve legacy CFD IoTDB behavior: old ingests have no
+                # materialized max_diff device and continue to use sidecars.
+                delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
+                if delta_file is not None:
+                    max_diffs_iot = read_max_diffs(delta_file)
+            geom = make_geom_client(cfg, ship, step, iotdb, cfg.fluid_zone(ship))
+            n_cells = cell_count(geom)
+            _bench(
+                "IoTDB",
+                lambda c, v: iotdb.point_query(c, v),
+                lambda lo, hi, v: iotdb.range_query_var(lo, hi, v),
+                lambda cells: geom.extract_submesh(cells),
+                lambda mesh, v, val: geom.isosurface_extraction(v, val),
+                n_cells,
+                max_diffs_iot,
+                cfg.duration_sec,
+                variables,
+            )
+        finally:
+            iotdb.close()
+
+    legacy_backends = backends.intersection({"tiledb", "vtk"})
     max_diffs = None
-    if other_backends:
+    if legacy_backends:
         delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
         if delta_file is None:
             print(
                 f"W3: no sidecar max_diffs for {ship} step {step}; "
-                f"skip {', '.join(sorted(other_backends))}"
+                f"skip {', '.join(sorted(legacy_backends))}"
             )
         else:
             max_diffs = read_max_diffs(delta_file)
-
-    if "iotdb" in backends and max_diffs is not None:
-        iotdb = make_iotdb(ship, step, cfg.fluid_zone(ship))
-        geom = make_geom_client(cfg, ship, step, iotdb, cfg.fluid_zone(ship))
-        n_cells = cell_count(geom)
-        _bench(
-            "IoTDB",
-            lambda c, v: iotdb.point_query(c, v),
-            lambda lo, hi, v: iotdb.range_query_var(lo, hi, v),
-            lambda cells: geom.extract_submesh(cells),
-            lambda mesh, v, val: geom.isosurface_extraction(v, val),
-            n_cells,
-            max_diffs,
-            cfg.duration_sec,
-            variables,
-        )
-        iotdb.close()
 
     if "tiledb" in backends and max_diffs is not None:
         tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship))

@@ -92,8 +92,33 @@ class MeshClient(Protocol):
     ) -> Tuple[NDArray[np.int32], NDArray[np.float64]]:
         ...
 
+    # H5-specific primitives used by W9-W11.
+    def is_h5_dataset(self) -> bool:
+        ...
 
-# Workload capability requirements (W1–W8)
+    def h5_element_ids_in_coordinate_range(
+        self, lower_bound: Sequence[float], upper_bound: Sequence[float]
+    ) -> NDArray[np.int64]:
+        ...
+
+    def frame_statistics(
+        self, attribute_name: Optional[str] = None, step: Optional[int] = None
+    ):
+        ...
+
+    def h5_nodal_variables(self) -> Tuple[str, ...]:
+        ...
+
+    def h5_point_ids(self) -> NDArray[np.int64]:
+        ...
+
+    def h5_point_frame_extrema(
+        self, point_ids: Sequence[int], attribute_name: str
+    ):
+        ...
+
+
+# Workload capability requirements
 WORKLOAD_CAPS = {
     "w1": {"mesh_static", "cell_vars"},
     "w2": {"cell_vars"},
@@ -103,4 +128,7 @@ WORKLOAD_CAPS = {
     "w6": {"mesh_static"},
     "w7": {"mesh_static", "cell_vars"},
     "w8": {"cell_vars", "cell_qcriterion"},
+    "w9": {"mesh_static", "h5_metadata"},
+    "w10": {"cell_vars", "h5_metadata"},
+    "w11": {"node_vars", "h5_metadata"},
 }

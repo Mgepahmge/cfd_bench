@@ -53,8 +53,9 @@ class MeshRuntime:
         return data
 
     def load(self, dataset_key: str, zone: str) -> RuntimeMeshData:
-        # Full load (used by workflows that need all topology).
-        data = self.ensure_face_planes(dataset_key, zone)
+        # Full topology needed by current geometry workloads.  face_planes are
+        # optional legacy CFD data and are not required by the current W1-W11
+        # implementations, which lets H5 meshes omit that device entirely.
         data = self.ensure_adjacency(dataset_key, zone)
         data = self.ensure_cell_nodes(dataset_key, zone)
         return data

@@ -1,11 +1,11 @@
-"""W10: H5 frame statistics over all mapped physical quantities."""
+"""W10: H5 frame statistics over mapped physical quantities."""
 
 from __future__ import annotations
 
 import argparse
 import time
 
-from cfd_bench.workloads.common.backends import make_pg
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
 
@@ -19,16 +19,29 @@ def _bench(label, stats_fn, duration, step):
     print(f"{label} W10: {txn} txns in {duration}s")
 
 
-def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
-    if "postgresql" not in backends:
-        raise RuntimeError("W10 currently supports PostgreSQL only")
-    pg = make_pg(ship, step, cfg.fluid_zone(ship))
+def _run_client(label, client, ship, step, duration):
     try:
-        if not pg.is_h5_dataset():
+        if not client.is_h5_dataset():
             raise RuntimeError(f"W10 currently supports H5-ingested datasets only: {ship}")
-        _bench("PG", pg.frame_statistics, cfg.duration_sec, step)
+        _bench(label, client.frame_statistics, duration, step)
     finally:
-        pg.close()
+        client.close()
+
+
+def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
+    unsupported = set(backends) - {"postgresql", "iotdb"}
+    if unsupported:
+        raise RuntimeError(f"W10 H5 support is not implemented for: {sorted(unsupported)}")
+    if "postgresql" in backends:
+        _run_client(
+            "PG", make_pg(ship, step, cfg.fluid_zone(ship)),
+            ship, step, cfg.duration_sec,
+        )
+    if "iotdb" in backends:
+        _run_client(
+            "IoTDB", make_iotdb(ship, step, cfg.fluid_zone(ship)),
+            ship, step, cfg.duration_sec,
+        )
 
 
 def main(ships=None):

@@ -1,4 +1,4 @@
-"""HDF5 inspection and PostgreSQL ingest commands."""
+"""HDF5 inspection and multi-backend ingest commands."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     ingest_ap = subparsers.add_parser(
         "ingest-h5",
-        help="Load an ODB-like .h5 result file into the PostgreSQL benchmark schema",
+        help="Load an ODB-like .h5 result file into benchmark storage backends",
     )
     ingest_ap.add_argument("--h5", required=True, help="Path to the result .h5 file")
     ingest_ap.add_argument(
@@ -66,6 +66,13 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
         required=True,
         metavar="DATASET",
         help="Dataset key used by PostgreSQL and workloads",
+    )
+    ingest_ap.add_argument(
+        "--backends",
+        nargs="+",
+        choices=["postgresql", "iotdb"],
+        default=["postgresql"],
+        help="H5 target backends (default: postgresql)",
     )
     ingest_ap.add_argument("--instance", default=None, help="Assembly instance (auto if only one)")
     ingest_ap.add_argument("--zone", default="0_Fluid", help="Target benchmark zone")
@@ -102,7 +109,7 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
     ingest_ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="Parse and convert in memory without opening PostgreSQL",
+        help="Parse and convert in memory without opening a database",
     )
     ingest_ap.add_argument("--no-init-schema", action="store_true")
     ingest_ap.add_argument("--no-build-spatial", action="store_true")
@@ -113,6 +120,11 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
     ingest_ap.add_argument("--db-password", default=None, help="Override CFD_BENCH_PG_PASSWORD")
     ingest_ap.add_argument("--db-host", default=None, help="Override CFD_BENCH_PG_HOST")
     ingest_ap.add_argument("--db-port", default=None, help="Override CFD_BENCH_PG_PORT")
+    ingest_ap.add_argument("--iotdb-host", default=None, help="Override CFD_BENCH_IOTDB_HOST")
+    ingest_ap.add_argument("--iotdb-port", default=None, help="Override CFD_BENCH_IOTDB_PORT")
+    ingest_ap.add_argument("--iotdb-user", default=None, help="Override CFD_BENCH_IOTDB_USER")
+    ingest_ap.add_argument("--iotdb-password", default=None, help="Override CFD_BENCH_IOTDB_PASSWORD")
+    ingest_ap.add_argument("--iotdb-root-path", default=None, help="Override CFD_BENCH_IOTDB_ROOT_PATH")
     ingest_ap.set_defaults(func=run_ingest_h5)
 
 
@@ -157,6 +169,7 @@ def _print_plan(plan, frames) -> None:
 
 def run_ingest_h5(args: argparse.Namespace) -> int:
     dataset = args.datasets
+    selected = list(dict.fromkeys(args.backends or ["postgresql"]))
     explicit = _parse_mapping(args.map)
     explicit_mapping = explicit or None
     if args.dry_run:
@@ -171,10 +184,11 @@ def run_ingest_h5(args: argparse.Namespace) -> int:
             include_empty_frames=args.include_empty_frames,
         )
         print(f"dataset: {dataset}")
+        print(f"target backends: {selected}")
         _print_plan(plan, frames)
         return 0
 
-    connection = _connection_args_from_cli(args)
+    # Build once for sidecar compatibility and a backend-independent summary.
     plan, mesh, frames = build_ingest_plan(
         args.h5,
         instance_name=args.instance,
@@ -185,33 +199,65 @@ def run_ingest_h5(args: argparse.Namespace) -> int:
         timestep_mode=args.timestep_mode,
         include_empty_frames=args.include_empty_frames,
     )
-    # The database loader parses the file again intentionally: it validates the
-    # exact same conversion before opening PostgreSQL and keeps the public API
-    # independently usable.
-    plan = load_h5_to_postgresql(
-        args.h5,
-        dataset,
-        instance_name=args.instance,
-        zone_type=args.zone,
-        step_names=args.steps,
-        vector_field=args.vector_field,
-        scalar_fields=args.scalar_fields,
-        explicit_mapping=explicit_mapping,
-        timestep_mode=args.timestep_mode,
-        include_empty_frames=args.include_empty_frames,
-        init_schema=not args.no_init_schema,
-        build_spatial=not args.no_build_spatial,
-        connection=connection,
-    )
+
+    completed = []
+    if "postgresql" in selected:
+        connection = _connection_args_from_cli(args)
+        # Keep the v5 PostgreSQL loader call and defaults unchanged.
+        load_h5_to_postgresql(
+            args.h5,
+            dataset,
+            instance_name=args.instance,
+            zone_type=args.zone,
+            step_names=args.steps,
+            vector_field=args.vector_field,
+            scalar_fields=args.scalar_fields,
+            explicit_mapping=explicit_mapping,
+            timestep_mode=args.timestep_mode,
+            include_empty_frames=args.include_empty_frames,
+            init_schema=not args.no_init_schema,
+            build_spatial=not args.no_build_spatial,
+            connection=connection,
+        )
+        completed.append("postgresql")
+
+    if "iotdb" in selected:
+        from cfd_bench.infra.iotdb.config import IoTDBConfig
+        from cfd_bench.ingest.h5.iotdb import IoTDBConnectionArgs, load_h5_to_iotdb
+
+        cfg = IoTDBConfig()
+        connection = IoTDBConnectionArgs(
+            host=args.iotdb_host or cfg.host,
+            port=args.iotdb_port or cfg.port,
+            user=args.iotdb_user or cfg.user,
+            password=args.iotdb_password if args.iotdb_password is not None else cfg.password,
+            root_path=args.iotdb_root_path or cfg.root_path,
+        )
+        load_h5_to_iotdb(
+            args.h5,
+            dataset,
+            instance_name=args.instance,
+            zone_type=args.zone,
+            step_names=args.steps,
+            vector_field=args.vector_field,
+            scalar_fields=args.scalar_fields,
+            explicit_mapping=explicit_mapping,
+            timestep_mode=args.timestep_mode,
+            include_empty_frames=args.include_empty_frames,
+            connection=connection,
+        )
+        completed.append("iotdb")
+
     max_files = []
     if not args.no_max_diffs:
         max_files = list(write_max_diff_files(args.max_range_dir, dataset, mesh, frames))
     print(
-        f"H5 ingest OK: dataset={dataset} zone={args.zone} "
+        f"H5 ingest OK: dataset={dataset} zone={args.zone} backends={completed} "
         f"nodes={plan.node_count} cells={plan.cell_count} "
         f"frames={plan.frame_count} vars={list(plan.mapped_variables)} "
         f"nodal_vars={list(plan.mapped_node_variables)}"
     )
     if max_files:
-        print(f"W3 max_diffs: {len(max_files)} files -> {args.max_range_dir}")
+        print(f"W3 legacy max_diffs sidecars: {len(max_files)} files -> {args.max_range_dir}")
     return 0
+

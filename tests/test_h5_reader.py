@@ -272,3 +272,53 @@ def test_c3d10_spatial_shell_uses_four_corner_nodes():
     assert surface_points.shape == (4, 3)
     assert simplices.shape == (4, 3)
     assert np.allclose(surface_points, points[:4])
+
+
+def test_iotdb_h5_adapter_persists_mesh_frames_labels_and_maxdiff(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from cfd_bench.ingest.h5 import iotdb as h5iot
+
+    path = _make_case(tmp_path / "static_iotdb.h5")
+    plan, mesh, frames = build_ingest_plan(str(path))
+    captured = {}
+
+    T = SimpleNamespace(
+        DOUBLE="DOUBLE", INT32="INT32", INT64="INT64", TEXT="TEXT", BOOLEAN="BOOLEAN"
+    )
+
+    def fake_typed(session, device, times, measurements, types, rows):
+        captured[device] = {
+            "times": list(times),
+            "measurements": list(measurements),
+            "types": list(types),
+            "rows": [list(r) for r in rows],
+        }
+
+    monkeypatch.setattr(h5iot, "_types", lambda: T)
+    monkeypatch.setattr(h5iot, "_typed_tablet", fake_typed)
+
+    h5iot._insert_mesh(object(), "root.simulation_data", "beam_static", "0_Fluid", mesh)
+    h5iot._insert_frames(
+        object(), "root.simulation_data", "beam_static", "0_Fluid", mesh, frames, plan
+    )
+
+    base = "root.simulation_data.mesh_static.beam_static.0_Fluid"
+    assert captured[f"{base}.nodes"]["times"] == [0, 1, 2]
+    assert captured[f"{base}.cell_nodes"]["measurements"] == ["node_id_0", "node_id_1"]
+    assert captured[f"{base}.node_source"]["rows"] == [[1], [2], [3]]
+    assert captured[f"{base}.cell_source"]["rows"] == [[1, "B33"], [2, "B33"]]
+
+    step = "root.simulation_data.post_processing_management.beam_static.step_0"
+    assert set(captured[f"{step}.cell_vars"]["measurements"]) == {"U", "V", "W", "E"}
+    assert set(captured[f"{step}.node_vars"]["measurements"]) == {"U", "V", "W"}
+
+    meta = captured["root.simulation_data.h5_metadata.beam_static.dataset_meta"]
+    row = dict(zip(meta["measurements"], meta["rows"][0]))
+    assert row["zone"] == "0_Fluid"
+    assert row["common_variables_csv"] == "E,U,V,W"
+    assert row["common_nodal_variables_csv"] == "U,V,W"
+
+    maxdiff = captured["root.simulation_data.derived.beam_static.step_0.max_diff"]
+    values = dict(zip(maxdiff["measurements"], maxdiff["rows"][0]))
+    assert values["V"] == pytest.approx(1.0)
+    assert values["E"] == pytest.approx(4.0)

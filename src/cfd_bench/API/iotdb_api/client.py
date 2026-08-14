@@ -124,7 +124,7 @@ class IoTDBMeshClient(AbstractContextManager):
 
     def range_query_coord(self, lower_bound: Sequence[float], upper_bound: Sequence[float]) -> np.ndarray:
         ctx = self._require_ctx()
-        data = self.runtime.load(ctx.dataset_key, ctx.zone)
+        data = self.runtime.ensure_cells(ctx.dataset_key, ctx.zone)
         x0, y0, z0 = map(float, lower_bound)
         x1, y1, z1 = map(float, upper_bound)
         out = []
@@ -216,3 +216,61 @@ class IoTDBMeshClient(AbstractContextManager):
         vel_map = self.repo.fetch_velocity_map(ctx.dataset_key, ts, roi_ids, zone=ctx.zone)
         cell_ids, qvals = compute_qcriterion_roi(data, roi_ids, vel_map, tau=tau)
         return np.array(cell_ids, dtype=np.int32), np.array(qvals, dtype=np.float64)
+
+    def var_value_range(
+        self, attribute_name: str, step: Optional[int] = None
+    ) -> Tuple[float, float]:
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        return self.repo.fetch_var_value_range(
+            ctx.dataset_key, ts, str(attribute_name).upper(), zone=ctx.zone
+        )
+
+    def get_max_diffs(self, step: Optional[int] = None):
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        meta = self.repo.h5_dataset_metadata(ctx.dataset_key) if self.repo.is_h5_dataset(ctx.dataset_key) else {}
+        variables = list(meta.get("variables", ()))
+        return self.repo.fetch_max_diffs(ctx.dataset_key, ts, variables)
+
+    def is_h5_dataset(self) -> bool:
+        ctx = self._require_ctx()
+        return self.repo.is_h5_dataset(ctx.dataset_key)
+
+    def h5_element_ids_in_coordinate_range(
+        self, lower_bound: Sequence[float], upper_bound: Sequence[float]
+    ) -> np.ndarray:
+        ctx = self._require_ctx()
+        ids = self.repo.fetch_h5_element_ids_in_coordinate_range(
+            ctx.dataset_key, ctx.zone, lower_bound, upper_bound
+        )
+        return np.asarray(ids, dtype=np.int64)
+
+    def frame_statistics(
+        self, attribute_name: Optional[str] = None, step: Optional[int] = None
+    ):
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        return self.repo.fetch_frame_statistics(
+            ctx.dataset_key, ctx.zone, ts, attribute_name=attribute_name
+        )
+
+    def h5_nodal_variables(self) -> Tuple[str, ...]:
+        ctx = self._require_ctx()
+        meta = self.repo.h5_dataset_metadata(ctx.dataset_key)
+        return tuple(str(v).upper() for v in meta.get("common_nodal_variables", ()))
+
+    def h5_point_ids(self) -> np.ndarray:
+        ctx = self._require_ctx()
+        return np.asarray(
+            self.repo.fetch_h5_point_ids(ctx.dataset_key, ctx.zone), dtype=np.int64
+        )
+
+    def h5_point_frame_extrema(
+        self, point_ids: Sequence[int], attribute_name: str
+    ):
+        ctx = self._require_ctx()
+        return self.repo.fetch_h5_point_frame_extrema(
+            ctx.dataset_key, ctx.zone, point_ids, str(attribute_name).upper()
+        )
+

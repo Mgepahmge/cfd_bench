@@ -81,6 +81,25 @@ def workload_config_from_args(args, datasets=None, ships=None) -> WorkloadConfig
             discovered_variables[info.dataset_key] = list(info.variables)
             discovered_zones[info.dataset_key] = info.zone_type
 
+    needs_iotdb_discovery = "iotdb" in backends and (
+        explicit_steps is None
+        or explicit_variables is None
+        or explicit_zone is None
+    )
+    if needs_iotdb_discovery:
+        try:
+            from cfd_bench.infra.iotdb.discovery import discover_iotdb_datasets
+
+            infos = discover_iotdb_datasets(requested_ships)
+        except Exception:
+            infos = []
+        for info in infos:
+            # PostgreSQL discovery wins when both backends are selected.  This
+            # keeps the stable PostgreSQL runtime configuration unchanged.
+            discovered_steps.setdefault(info.dataset_key, list(info.timesteps))
+            discovered_variables.setdefault(info.dataset_key, list(info.variables))
+            discovered_zones.setdefault(info.dataset_key, info.zone_type)
+
     return WorkloadConfig(
         ships=requested_ships,
         duration_sec=args.duration,

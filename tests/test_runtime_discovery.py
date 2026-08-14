@@ -124,3 +124,120 @@ def test_w9_w10_w11_modules_have_expected_runner_hooks():
     assert callable(w9.run_ship)
     assert callable(w10.run_ship_step)
     assert callable(w11.run_ship)
+
+
+def test_h5_ingest_backend_defaults_to_postgresql_and_can_select_iotdb():
+    from cfd_bench.cli.main import build_parser
+
+    parser = build_parser()
+    default_args = parser.parse_args(
+        ["ingest-h5", "--h5", "/tmp/example.h5", "--datasets", "beam_static", "--dry-run"]
+    )
+    assert default_args.backends == ["postgresql"]
+
+    iotdb_args = parser.parse_args(
+        [
+            "ingest-h5", "--h5", "/tmp/example.h5", "--datasets", "beam_static",
+            "--backends", "iotdb", "--dry-run",
+        ]
+    )
+    assert iotdb_args.backends == ["iotdb"]
+
+
+def test_workload_config_can_discover_h5_metadata_from_iotdb(monkeypatch):
+    from cfd_bench.cli.main import build_parser
+    from cfd_bench.infra.iotdb.discovery import IoTDBDatasetInfo
+    from cfd_bench.infra.iotdb import discovery
+    from cfd_bench.workloads.common.cli import workload_config_from_args
+
+    monkeypatch.setattr(
+        discovery,
+        "discover_iotdb_datasets",
+        lambda selected: [
+            IoTDBDatasetInfo(
+                dataset_key="beam_modal",
+                zone_type="0_Fluid",
+                timesteps=(0, 1, 2),
+                variables=("U", "V", "W"),
+            )
+        ],
+    )
+    args = build_parser().parse_args(
+        ["run", "--datasets", "beam_modal", "--backend", "iotdb", "--duration", "0.01"]
+    )
+    cfg = workload_config_from_args(args)
+    assert cfg.valid_steps("beam_modal") == [0, 1, 2]
+    assert cfg.valid_variables("beam_modal") == ["U", "V", "W"]
+    assert cfg.fluid_zone("beam_modal") == "0_Fluid"
+
+
+def test_iotdb_h5_client_exposes_w9_w11_primitives_without_importing_iotdb_driver(monkeypatch):
+    import numpy as np
+    from cfd_bench.API.iotdb_api.client import IoTDBMeshClient
+    from cfd_bench.core.context import MeshContext
+
+    client = IoTDBMeshClient()
+    client.ctx = MeshContext(dataset_key="beam_modal", step=0, zone="0_Fluid")
+    monkeypatch.setattr(client.repo, "is_h5_dataset", lambda dataset: True)
+    monkeypatch.setattr(
+        client.repo,
+        "fetch_h5_element_ids_in_coordinate_range",
+        lambda dataset, zone, lo, hi: [101, 205],
+    )
+    monkeypatch.setattr(
+        client.repo,
+        "h5_dataset_metadata",
+        lambda dataset: {"common_nodal_variables": ("U", "V", "W")},
+    )
+    monkeypatch.setattr(client.repo, "fetch_h5_point_ids", lambda dataset, zone: [1, 7, 9])
+    monkeypatch.setattr(
+        client.repo,
+        "fetch_h5_point_frame_extrema",
+        lambda dataset, zone, ids, var: {int(ids[0]): (-2.0, 3.0)},
+    )
+
+    assert client.is_h5_dataset()
+    assert client.h5_element_ids_in_coordinate_range([0, 0, 0], [1, 1, 1]).tolist() == [101, 205]
+    assert client.h5_nodal_variables() == ("U", "V", "W")
+    assert client.h5_point_ids().tolist() == [1, 7, 9]
+    assert client.h5_point_frame_extrema([7], "V") == {7: (-2.0, 3.0)}
+
+
+def test_iotdb_repository_h5_metadata_stats_and_cross_frame_extrema(monkeypatch):
+    from cfd_bench.infra.iotdb.repository import IoTDBRepository
+    from cfd_bench.infra.iotdb.config import IoTDBConfig
+
+    repo = IoTDBRepository(IoTDBConfig())
+
+    def fake_query(sql):
+        if ".h5_metadata.beam.dataset_meta" in sql:
+            return [(0, [
+                "true", "0_Fluid", "PART-1", "PART-1-1",
+                "E,U,V,W", "U,V,W", "E,U,V,W", "U,V,W",
+                "B33", "3", "2",
+            ])]
+        if ".h5_metadata.beam.frames" in sql:
+            return [(0, ["0"]), (1, ["1"])]
+        if ".node_source" in sql:
+            return [(0, ["10"]), (2, ["30"])]
+        if ".step_0.node_vars" in sql and "COUNT(" in sql:
+            return [(0, ["2", "1.0", "5.0", "3.0", "2.0"])]
+        if ".step_0.node_vars" in sql:
+            return [(0, ["1.0"]), (2, ["5.0"])]
+        if ".step_1.node_vars" in sql:
+            return [(0, ["-2.0"]), (2, ["7.0"])]
+        if ".step_0.cell_vars" in sql and "COUNT(" in sql:
+            return [(0, ["2", "2.0", "6.0", "4.0", "2.0"])]
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(repo, "query_rows", fake_query)
+    meta = repo.h5_dataset_metadata("beam")
+    assert meta["common_variables"] == ("E", "U", "V", "W")
+    assert repo.h5_frame_timesteps("beam") == [0, 1]
+    assert repo.fetch_h5_point_frame_extrema("beam", "0_Fluid", [10, 30], "V") == {
+        10: (-2.0, 1.0),
+        30: (5.0, 7.0),
+    }
+    stats = repo.fetch_frame_statistics("beam", "0_Fluid", 0, "V")
+    assert stats["V"]["position"] == "node"
+    assert stats["V"]["mean"] == pytest.approx(3.0)

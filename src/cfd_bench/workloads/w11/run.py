@@ -1,4 +1,4 @@
-"""W11: H5 point extrema across all frames (PostgreSQL only for now)."""
+"""W11: H5 point extrema across all frames."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import random
 import time
 
-from cfd_bench.workloads.common.backends import make_pg
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
 
@@ -14,8 +14,8 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 POINT_BATCH_SIZE = 32
 
 
-def _select_variables(pg, cfg: WorkloadConfig, dataset: str):
-    available = list(pg.h5_nodal_variables())
+def _select_variables(client, cfg: WorkloadConfig, dataset: str):
+    available = list(client.h5_nodal_variables())
     if cfg.variables is None:
         return available
     requested = [str(v).upper() for v in cfg.variables]
@@ -47,27 +47,34 @@ def _bench(label, extrema_fn, point_ids, variables, duration, batch_size=POINT_B
     )
 
 
-def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
-    if "postgresql" not in backends:
-        raise RuntimeError("W11 currently supports PostgreSQL only")
-    steps = cfg.valid_steps(ship)
-    if not steps:
-        raise RuntimeError(f"W11 dataset has no discovered frames: {ship}")
-    pg = make_pg(ship, steps[0], cfg.fluid_zone(ship))
+def _run_client(label, client, cfg: WorkloadConfig, ship: str):
     try:
-        if not pg.is_h5_dataset():
+        if not client.is_h5_dataset():
             raise RuntimeError(f"W11 currently supports H5-ingested datasets only: {ship}")
-        point_ids = [int(x) for x in pg.h5_point_ids().tolist()]
-        variables = _select_variables(pg, cfg, ship)
+        point_ids = [int(x) for x in client.h5_point_ids().tolist()]
+        variables = _select_variables(client, cfg, ship)
         _bench(
-            "PG",
-            pg.h5_point_frame_extrema,
+            label,
+            client.h5_point_frame_extrema,
             point_ids,
             variables,
             cfg.duration_sec,
         )
     finally:
-        pg.close()
+        client.close()
+
+
+def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
+    unsupported = set(backends) - {"postgresql", "iotdb"}
+    if unsupported:
+        raise RuntimeError(f"W11 H5 support is not implemented for: {sorted(unsupported)}")
+    steps = cfg.valid_steps(ship)
+    if not steps:
+        raise RuntimeError(f"W11 dataset has no discovered frames: {ship}")
+    if "postgresql" in backends:
+        _run_client("PG", make_pg(ship, steps[0], cfg.fluid_zone(ship)), cfg, ship)
+    if "iotdb" in backends:
+        _run_client("IoTDB", make_iotdb(ship, steps[0], cfg.fluid_zone(ship)), cfg, ship)
 
 
 def main(ships=None):
