@@ -1,0 +1,2 @@
+[console_scripts]
+cfd-bench = cfd_bench.cli.main:main

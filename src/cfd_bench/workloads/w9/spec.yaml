@@ -1,0 +1,8 @@
+name: w9
+description: H5 element IDs selected by centroid coordinate range
+required_caps:
+  - mesh_static
+  - h5_metadata
+backends:
+  - postgresql
+allow_vtk_baseline: false

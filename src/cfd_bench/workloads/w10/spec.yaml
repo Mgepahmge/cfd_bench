@@ -1,0 +1,8 @@
+name: w10
+description: H5 frame statistics (count/min/max/mean/stddev) for mapped fields
+required_caps:
+  - cell_vars
+  - h5_metadata
+backends:
+  - postgresql
+allow_vtk_baseline: false

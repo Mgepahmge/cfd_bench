@@ -1,0 +1,8 @@
+name: w11
+description: H5 point IDs queried across all frames for nodal field minima/maxima
+required_caps:
+  - h5_metadata
+  - node_vars
+backends:
+  - postgresql
+allow_vtk_baseline: false
