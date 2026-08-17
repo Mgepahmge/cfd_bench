@@ -127,13 +127,17 @@ PYTHONPATH=src python -m cfd_bench.ingest.tiledb.load_cell_vars --dat_dir /path/
 | W2 | Coordinate range query + multi-timestep point query + aggregation |
 | W3 | Variable-range submesh + isosurface extraction |
 | W4 | Multi-timestep particle advection (Δt = 0.01) |
-| W5 | Single-timestep streamline integration (Δt = 1.0) |
+| W5 | Single-timestep streamline integration (Δt = 1.0; exits on mesh miss/invalid velocity/deadline) |
 | W6 | Hull surface pressure integration (normals + scalar query) |
 | W7 | ROI Q-criterion computation |
 | W8 | Variable range query (vortex / threshold cell selection) |
 | W9 | H5 element centroid coordinate range → source element IDs (PostgreSQL / IoTDB / TileDB) |
 | W10 | H5 Frame statistics: count/min/max/mean/stddev for mapped fields (PostgreSQL / IoTDB / TileDB) |
 | W11 | H5 source point IDs → per-point min/max across all Frames for a nodal field (PostgreSQL / IoTDB / TileDB) |
+
+### W5 point-location semantics
+
+`point_intersection()` now has one no-hit convention across PostgreSQL, IoTDB, TileDB, and VTK: points that do not hit a cell are omitted from the returned ID array. W5 also enforces the benchmark deadline inside each streamline, stops on non-finite/zero velocity, and caps the number of integration steps so a single transaction cannot run forever. Existing ingested data does not need to be rebuilt for this change.
 
 ### Geometry engine (`--geom-engine`)
 

@@ -149,9 +149,9 @@ def point_intersection(
         if candidates:
             cid = min(candidates, key=lambda c: _dist2(pt, centroids.get(c, (1e18, 1e18, 1e18))))
             out.append(int(cid))
-        elif centroids:
-            cid = min(centroids.keys(), key=lambda c: _dist2(pt, centroids[c]))
-            out.append(int(cid))
+        # No bucket hit means no containing cell candidate.  Do not snap the
+        # point to a globally-nearest centroid: streamline workloads rely on
+        # an empty result to detect that a particle has left the mesh.
     return np.array(out, dtype=np.int32)
 
 

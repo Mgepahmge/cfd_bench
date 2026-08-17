@@ -129,7 +129,10 @@ def iotdb_point_intersection(data: RuntimeMeshData, points: np.ndarray, eps: flo
             idx = np.flatnonzero(mask)
             if idx.size > 0:
                 hit = int(all_ids[int(idx[0])])
-        out.append(hit)
+        # Keep the API consistent with VTK/PostgreSQL: misses are omitted
+        # rather than represented by a synthetic -1 cell id.
+        if hit >= 0:
+            out.append(hit)
     return np.array(out, dtype=np.int32)
 
 

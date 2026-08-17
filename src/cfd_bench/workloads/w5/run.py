@@ -15,22 +15,78 @@ from cfd_bench.workloads.common.metrics import cal_next_point
 from cfd_bench.workloads.common.random_geom import random_start_point
 
 
+# A transaction must never be able to outlive the benchmark indefinitely,
+# even if a backend accidentally reports a hit forever.
+_MAX_STREAMLINE_STEPS = 10_000
+_MIN_SPEED = 1e-15
+
+
+def _integrate_one_streamline(
+    scalar_fn,
+    intersect_fn,
+    cid: int,
+    coord: np.ndarray,
+    *,
+    deadline: float,
+    delta_t: float,
+    max_steps: int = _MAX_STREAMLINE_STEPS,
+) -> bool:
+    """Integrate one streamline.
+
+    Returns ``True`` when the transaction reached a normal/safety terminal
+    condition and ``False`` when the global benchmark deadline expired.
+    """
+    cur_cid = int(cid)
+    cur_coord = np.asarray(coord, dtype=np.float64)
+
+    for _ in range(max_steps):
+        if time.monotonic() >= deadline:
+            return False
+
+        u, v, w = scalar_fn(cur_cid)
+        vel = np.array([u, v, w], dtype=np.float64)
+        if not np.all(np.isfinite(vel)) or float(np.linalg.norm(vel)) <= _MIN_SPEED:
+            return True
+
+        nxt = np.asarray(cal_next_point(cur_coord, vel, delta_t), dtype=np.float64)
+        if not np.all(np.isfinite(nxt)) or np.array_equal(nxt, cur_coord):
+            return True
+
+        nxt_cells = intersect_fn(np.array([nxt], dtype=np.float64))
+        if len(nxt_cells) == 0:
+            return True
+
+        cur_cid = int(nxt_cells[0])
+        cur_coord = nxt
+
+    # Safety cap: treat a very long streamline as one completed transaction
+    # rather than allowing a single transaction to run forever.
+    return True
+
+
 def _streamline(label, scalar_fn, intersect_fn, bounds, duration, delta_t=1.0):
     txn = 0
-    t0 = time.time()
-    while time.time() - t0 < duration:
-        cid, coord = random_start_point(intersect_fn, bounds)
-        cur_cid, cur_coord = cid, coord
-        while True:
-            u, v, w = scalar_fn(cur_cid)
-            vel = np.array([u, v, w], dtype=np.float64)
-            nxt = cal_next_point(cur_coord, vel, delta_t)
-            nxt_cells = intersect_fn(np.array([nxt], dtype=np.float64))
-            if len(nxt_cells) == 0:
-                break
-            cur_cid = int(nxt_cells[0])
-            cur_coord = nxt
+    start = time.monotonic()
+    deadline = start + float(duration)
+
+    while time.monotonic() < deadline:
+        try:
+            cid, coord = random_start_point(intersect_fn, bounds, deadline=deadline)
+        except TimeoutError:
+            break
+
+        completed = _integrate_one_streamline(
+            scalar_fn,
+            intersect_fn,
+            cid,
+            coord,
+            deadline=deadline,
+            delta_t=delta_t,
+        )
+        if not completed:
+            break
         txn += 1
+
     print(f"{label} W5: {txn} txns in {duration}s")
 
 

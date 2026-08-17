@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import Sequence, Tuple
 
 import numpy as np
@@ -43,10 +44,16 @@ def random_coord_range(bounds: Sequence[float]) -> Tuple[NDArray[np.float64], ND
     return np.array([x1, y1, z1], dtype=np.float64), np.array([x2, y2, z2], dtype=np.float64)
 
 
-def random_start_point(intersect_fn, bounds: Sequence[float]):
-    """Random point with exactly one containing cell."""
-    while True:
+def random_start_point(intersect_fn, bounds: Sequence[float], *, deadline: float | None = None):
+    """Random point with exactly one containing cell.
+
+    ``deadline`` is an optional ``time.monotonic()`` deadline used by
+    long-running workloads so a sparse/degenerate mesh cannot trap the
+    benchmark forever while searching for a valid start point.
+    """
+    while deadline is None or time.monotonic() < deadline:
         pt = random_points_in_bbox(bounds, count=1)[0]
         cells = intersect_fn(np.array([pt], dtype=np.float64))
         if len(cells) == 1:
             return int(cells[0]), pt
+    raise TimeoutError("timed out while searching for a streamline start point")
