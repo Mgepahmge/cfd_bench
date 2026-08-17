@@ -322,3 +322,73 @@ def test_iotdb_h5_adapter_persists_mesh_frames_labels_and_maxdiff(tmp_path, monk
     values = dict(zip(maxdiff["measurements"], maxdiff["rows"][0]))
     assert values["V"] == pytest.approx(1.0)
     assert values["E"] == pytest.approx(4.0)
+
+
+def test_tiledb_h5_adapter_emits_legacy_mesh_plus_h5_extensions(tmp_path):
+    from cfd_bench.ingest.h5.tiledb import write_plan_to_tiledb
+
+    path = _make_case(tmp_path / "static_tiledb.h5")
+    plan, mesh, frames = build_ingest_plan(str(path))
+
+    class FakeTileDBIO:
+        def __init__(self):
+            self.calls = []
+
+        @staticmethod
+        def mesh_static_uri(root, dataset, zone, leaf):
+            return f"{root}/{dataset}/mesh_static/{zone}/{leaf}.tdb"
+
+        @staticmethod
+        def post_uri(root, dataset, step, leaf):
+            return f"{root}/{dataset}/post_processing/step_{step}/{leaf}.tdb"
+
+        @staticmethod
+        def derived_uri(root, dataset, step, leaf):
+            return f"{root}/{dataset}/derived/step_{step}/{leaf}.tdb"
+
+        @staticmethod
+        def h5_metadata_uri(root, dataset, leaf="dataset_meta"):
+            return f"{root}/{dataset}/h5_metadata/{leaf}.tdb"
+
+        def _capture(self, name, *args, **kwargs):
+            self.calls.append((name, args, kwargs))
+
+        def write_mesh_meta(self, *a, **k): self._capture("mesh_meta", *a, **k)
+        def write_nodes(self, *a, **k): self._capture("nodes", *a, **k)
+        def write_cells(self, *a, **k): self._capture("cells", *a, **k)
+        def write_cell_nodes(self, *a, **k): self._capture("cell_nodes", *a, **k)
+        def write_cell_adjacency(self, *a, **k): self._capture("cell_adjacency", *a, **k)
+        def write_source_labels(self, *a, **k): self._capture("node_source", *a, **k)
+        def write_cell_source(self, *a, **k): self._capture("cell_source", *a, **k)
+        def write_h5_dataset_meta(self, *a, **k): self._capture("h5_meta", *a, **k)
+        def write_cell_vars(self, *a, **k): self._capture("cell_vars", *a, **k)
+        def write_node_vars(self, *a, **k): self._capture("node_vars", *a, **k)
+        def write_max_diffs(self, *a, **k): self._capture("max_diff", *a, **k)
+
+    fake = FakeTileDBIO()
+    write_plan_to_tiledb(
+        "beam_static", "0_Fluid", str(tmp_path / "TileDB_Instances"),
+        plan, mesh, frames, io_module=fake,
+    )
+
+    names = [name for name, _, _ in fake.calls]
+    assert names == [
+        "mesh_meta", "nodes", "cells", "cell_nodes", "cell_adjacency",
+        "node_source", "cell_source", "h5_meta", "cell_vars", "max_diff", "node_vars",
+    ]
+
+    cell_nodes = next(args for name, args, _ in fake.calls if name == "cell_nodes")[1]
+    adjacency = next(args for name, args, _ in fake.calls if name == "cell_adjacency")[1]
+    assert cell_nodes.shape == (2, 16)
+    assert cell_nodes[0, :2].tolist() == [0, 1]
+    assert np.all(cell_nodes[:, 2:] == -1)
+    assert adjacency.shape == (2, 16)
+
+    h5_meta = next(args for name, args, _ in fake.calls if name == "h5_meta")[1]
+    assert h5_meta["common_variables_csv"] == "E,U,V,W"
+    assert h5_meta["common_nodal_variables_csv"] == "U,V,W"
+    assert h5_meta["timesteps_csv"] == "0"
+
+    maxdiff = next(args for name, args, _ in fake.calls if name == "max_diff")[1]
+    assert maxdiff["V"] == pytest.approx(1.0)
+    assert maxdiff["E"] == pytest.approx(4.0)

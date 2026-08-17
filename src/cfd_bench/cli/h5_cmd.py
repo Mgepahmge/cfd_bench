@@ -6,7 +6,7 @@ import argparse
 import json
 from typing import Dict, Optional, Tuple
 
-from cfd_bench.core.paths import resolve_max_range_dir
+from cfd_bench.core.paths import resolve_max_range_dir, resolve_tiledb_root
 from cfd_bench.infra.postgresql.config import PostgreSQLConfig
 from cfd_bench.ingest.h5.artifacts import write_max_diff_files
 from cfd_bench.ingest.h5.postgresql import (
@@ -65,12 +65,12 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--datasets",
         required=True,
         metavar="DATASET",
-        help="Dataset key used by PostgreSQL and workloads",
+        help="Dataset key used by benchmark storage backends and workloads",
     )
     ingest_ap.add_argument(
         "--backends",
         nargs="+",
-        choices=["postgresql", "iotdb"],
+        choices=["postgresql", "iotdb", "tiledb"],
         default=["postgresql"],
         help="H5 target backends (default: postgresql)",
     )
@@ -125,6 +125,7 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
     ingest_ap.add_argument("--iotdb-user", default=None, help="Override CFD_BENCH_IOTDB_USER")
     ingest_ap.add_argument("--iotdb-password", default=None, help="Override CFD_BENCH_IOTDB_PASSWORD")
     ingest_ap.add_argument("--iotdb-root-path", default=None, help="Override CFD_BENCH_IOTDB_ROOT_PATH")
+    ingest_ap.add_argument("--tiledb-root", default=resolve_tiledb_root(), help="TileDB root directory")
     ingest_ap.set_defaults(func=run_ingest_h5)
 
 
@@ -247,6 +248,24 @@ def run_ingest_h5(args: argparse.Namespace) -> int:
             connection=connection,
         )
         completed.append("iotdb")
+
+    if "tiledb" in selected:
+        from cfd_bench.ingest.h5.tiledb import load_h5_to_tiledb
+
+        load_h5_to_tiledb(
+            args.h5,
+            dataset,
+            root_path=args.tiledb_root,
+            instance_name=args.instance,
+            zone_type=args.zone,
+            step_names=args.steps,
+            vector_field=args.vector_field,
+            scalar_fields=args.scalar_fields,
+            explicit_mapping=explicit_mapping,
+            timestep_mode=args.timestep_mode,
+            include_empty_frames=args.include_empty_frames,
+        )
+        completed.append("tiledb")
 
     max_files = []
     if not args.no_max_diffs:

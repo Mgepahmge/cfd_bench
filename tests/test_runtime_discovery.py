@@ -241,3 +241,63 @@ def test_iotdb_repository_h5_metadata_stats_and_cross_frame_extrema(monkeypatch)
     stats = repo.fetch_frame_statistics("beam", "0_Fluid", 0, "V")
     assert stats["V"]["position"] == "node"
     assert stats["V"]["mean"] == pytest.approx(3.0)
+
+
+def test_h5_ingest_can_select_tiledb_and_keeps_postgresql_default():
+    from cfd_bench.cli.main import build_parser
+
+    parser = build_parser()
+    default_args = parser.parse_args(
+        ["ingest-h5", "--h5", "/tmp/example.h5", "--datasets", "beam_static", "--dry-run"]
+    )
+    assert default_args.backends == ["postgresql"]
+
+    tiledb_args = parser.parse_args(
+        [
+            "ingest-h5", "--h5", "/tmp/example.h5", "--datasets", "beam_static",
+            "--backends", "tiledb", "--tiledb-root", "/tmp/TileDB_Instances", "--dry-run",
+        ]
+    )
+    assert tiledb_args.backends == ["tiledb"]
+    assert tiledb_args.tiledb_root == "/tmp/TileDB_Instances"
+
+
+def test_w9_w10_w11_accept_tiledb_backend_without_eager_tiledb_import():
+    from cfd_bench.workloads.w9 import run as w9
+    from cfd_bench.workloads.w10 import run as w10
+    from cfd_bench.workloads.w11 import run as w11
+
+    # Factories remain lazy; importing workload modules must not require TileDB-Py.
+    assert "tiledb" in w9.run_ship.__code__.co_consts
+    assert "tiledb" in w10.run_ship_step.__code__.co_consts
+    assert "tiledb" in w11.run_ship.__code__.co_consts
+
+
+def test_workload_config_can_discover_h5_metadata_from_tiledb(monkeypatch):
+    from cfd_bench.cli.main import build_parser
+    from cfd_bench.infra.tiledb.discovery import TileDBDatasetInfo
+    from cfd_bench.infra.tiledb import discovery
+    from cfd_bench.workloads.common.cli import workload_config_from_args
+
+    monkeypatch.setattr(
+        discovery,
+        "discover_tiledb_datasets",
+        lambda selected, config=None: [
+            TileDBDatasetInfo(
+                dataset_key="beam_modal",
+                zone_type="0_Fluid",
+                timesteps=(0, 1, 2),
+                variables=("U", "V", "W"),
+            )
+        ],
+    )
+    args = build_parser().parse_args(
+        [
+            "run", "--datasets", "beam_modal", "--backend", "tiledb",
+            "--tiledb-root", "/tmp/TileDB_Instances", "--duration", "0.01",
+        ]
+    )
+    cfg = workload_config_from_args(args)
+    assert cfg.valid_steps("beam_modal") == [0, 1, 2]
+    assert cfg.valid_variables("beam_modal") == ["U", "V", "W"]
+    assert cfg.fluid_zone("beam_modal") == "0_Fluid"

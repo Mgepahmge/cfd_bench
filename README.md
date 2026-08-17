@@ -131,9 +131,9 @@ PYTHONPATH=src python -m cfd_bench.ingest.tiledb.load_cell_vars --dat_dir /path/
 | W6 | Hull surface pressure integration (normals + scalar query) |
 | W7 | ROI Q-criterion computation |
 | W8 | Variable range query (vortex / threshold cell selection) |
-| W9 | H5 element centroid coordinate range → source element IDs (PostgreSQL / IoTDB) |
-| W10 | H5 Frame statistics: count/min/max/mean/stddev for mapped fields (PostgreSQL / IoTDB) |
-| W11 | H5 source point IDs → per-point min/max across all Frames for a nodal field (PostgreSQL / IoTDB) |
+| W9 | H5 element centroid coordinate range → source element IDs (PostgreSQL / IoTDB / TileDB) |
+| W10 | H5 Frame statistics: count/min/max/mean/stddev for mapped fields (PostgreSQL / IoTDB / TileDB) |
+| W11 | H5 source point IDs → per-point min/max across all Frames for a nodal field (PostgreSQL / IoTDB / TileDB) |
 
 ### Geometry engine (`--geom-engine`)
 
@@ -179,7 +179,7 @@ Download CFD Lifecycle Dataset (.dat files in `postprocessing/`) before ingest:
 
 https://www.scidb.cn/en/detail?dataSetId=3553563d222d41998d7ccdd2ceff1bf9
 
-## ODB-like HDF5 result ingest (PostgreSQL / IoTDB)
+## ODB-like HDF5 result ingest (PostgreSQL / IoTDB / TileDB)
 
 The PostgreSQL HDF5 path is metadata-driven. For the normal single-instance case, the minimal workflow is:
 
@@ -194,12 +194,16 @@ cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static
 # IoTDB only.
 cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends iotdb
 
-# Or load the same canonical H5 data to both databases.
-cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends postgresql iotdb
+# TileDB only.
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends tiledb
+
+# Or load the same canonical H5 data to multiple backends.
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends postgresql iotdb tiledb
 
 # Runtime metadata is auto-discovered from the selected backend.
 cfd-bench run --datasets beam_static
 cfd-bench run --datasets beam_static --backend iotdb
+cfd-bench run --datasets beam_static --backend tiledb
 ```
 
 The dataset key is explicit and required via `--datasets`. `--instance`, `--steps`, `--vector-field`, `--scalar-fields`, `--map`, `--zone-fluid`, `--variables`, etc. remain available as **overrides** when the source is genuinely ambiguous; they are not required for ordinary unambiguous files. Explicit `--map` entries augment the inferred mapping instead of replacing it, so for example `--map P=S.S11` keeps automatically discovered U/V/W/E.
@@ -226,18 +230,37 @@ The H5 IoTDB adapter reuses the existing tree-model convention that the IoTDB `T
 | `h5_metadata.<dataset>.frames` | frame/timestep ID | Step/Frame/mode/time-frequency metadata | discovery/W11 |
 | `derived.<dataset>.step_<n>.max_diff` | 0 | per-variable max neighbor difference | W3 |
 
+### H5 → TileDB layout
+
+The H5 TileDB adapter reuses the legacy dense-array layout. Dense benchmark IDs remain the array dimensions, while source FE labels and H5 metadata are stored separately so W1–W8 keep using the original TileDB runtime.
+
+| TileDB array | Dimension | Stored values | Workloads |
+|---|---|---|---|
+| `mesh_static/<zone>/nodes.tdb` | dense node ID | x/y/z | W1/W3/W7 |
+| `mesh_static/<zone>/cells.tdb` | dense element ID | centroid + bbox + numeric cell type | W1/W2/W4/W5/W7/W9 |
+| `mesh_static/<zone>/cell_nodes.tdb` | dense element ID | 16 fixed node slots | W1/W3/W6 |
+| `mesh_static/<zone>/cell_adjacency.tdb` | dense element ID | 16 fixed neighbor slots | W3/W7 |
+| `mesh_static/<zone>/node_source.tdb` | dense node ID | original H5 node label | W11 |
+| `mesh_static/<zone>/cell_source.tdb` | dense element ID | original H5 element label + element type code | W9 |
+| `post_processing/step_<n>/cell_vars.tdb` | dense element ID | mapped cell fields | W1–W8/W10 |
+| `post_processing/step_<n>/node_vars.tdb` | dense node ID | genuine nodal mapped fields | W10/W11 |
+| `h5_metadata/dataset_meta.tdb` | 0 | discovery metadata and Frame list | discovery/W9–W11 |
+| `derived/step_<n>/max_diff.tdb` | 0 | per-variable max neighbor difference | W3 |
+
+B33 and C3D10 both fit the current 16-slot topology arrays (2 and 10 nodes per element respectively; C3D10 has at most 4 face-neighbors).
+
 ### H5-only workloads W9–W11
 
-W9–W11 support both PostgreSQL and IoTDB H5 ingests. W9 selects source H5 element labels by element-centroid coordinate box. W10 computes count/min/max/mean/population-stddev for mapped physical quantities in a selected Frame, using genuine nodal values when the source field is nodal and cell values otherwise. W11 samples source H5 node labels and computes per-node min/max for one directly nodal physical quantity across all ingested Frames.
+W9–W11 support PostgreSQL, IoTDB, and TileDB H5 ingests. W9 selects source H5 element labels by element-centroid coordinate box. W10 computes count/min/max/mean/population-stddev for mapped physical quantities in a selected Frame, using genuine nodal values when the source field is nodal and cell values otherwise. W11 samples source H5 node labels and computes per-node min/max for one directly nodal physical quantity across all ingested Frames.
 
 ```bash
-cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_modal --backends iotdb
-cfd-bench run --workloads w9 w10 w11 --datasets beam_modal --backend iotdb --duration 10
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_modal --backends tiledb
+cfd-bench run --workloads w9 w10 w11 --datasets beam_modal --backend tiledb --duration 10
 ```
 
 ### W3 max-diff metadata
 
-New HDF5 ingests materialize W3 search widths inside the selected database: PostgreSQL uses `benchmark_max_diff`; IoTDB uses `derived.{dataset}.step_<n>.max_diff`. PostgreSQL retains its old-database recomputation fallback, while legacy CFD IoTDB can still use Max_Range sidecars. New H5 IoTDB workloads do not depend on a machine-specific Max_Range directory.
+New HDF5 ingests materialize W3 search widths inside the selected backend: PostgreSQL uses `benchmark_max_diff`; IoTDB uses `derived.{dataset}.step_<n>.max_diff`; TileDB uses `derived/step_<n>/max_diff.tdb`. PostgreSQL retains its old-database recomputation fallback, while legacy CFD IoTDB/TileDB can still use Max_Range sidecars. New H5 IoTDB/TileDB workloads do not depend on a machine-specific Max_Range directory.
 
 ### PostgreSQL connection settings
 
@@ -265,4 +288,4 @@ export CFD_BENCH_IOTDB_ROOT_PATH=root.simulation_data
 
 `ingest-h5` also exposes `--iotdb-*` one-command overrides. PostgreSQL defaults and commands are unchanged when `--backends` is omitted.
 
-Install HDF5 support with `pip install 'cfd_bench[h5]'`; PostgreSQL loading additionally requires `pip install 'cfd_bench[postgresql]'`, and IoTDB loading requires `pip install 'cfd_bench[iotdb]'`.
+Install HDF5 support with `pip install 'cfd_bench[h5]'`; backend loading additionally requires the corresponding extra: `cfd_bench[postgresql]`, `cfd_bench[iotdb]`, or `cfd_bench[tiledb]`.

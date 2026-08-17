@@ -84,7 +84,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             pg.close()
 
     # H5 IoTDB ingest materializes max-diff metadata in IoTDB, matching the
-    # self-contained PostgreSQL path.  Legacy TileDB/VTK still use sidecars.
+    # self-contained PostgreSQL path. Legacy CFD IoTDB can still use sidecars.
     if "iotdb" in backends:
         iotdb = make_iotdb(ship, step, cfg.fluid_zone(ship))
         try:
@@ -111,34 +111,39 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         finally:
             iotdb.close()
 
-    legacy_backends = backends.intersection({"tiledb", "vtk"})
+    if "tiledb" in backends:
+        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship))
+        try:
+            max_diffs_tiledb = tiledb.get_max_diffs(step)
+            if not max_diffs_tiledb:
+                # Preserve legacy CFD TileDB behavior: old ingests still use
+                # the historical Max_Range sidecar.
+                delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
+                if delta_file is not None:
+                    max_diffs_tiledb = read_max_diffs(delta_file)
+            geom = make_geom_client(cfg, ship, step, tiledb, cfg.fluid_zone(ship))
+            n_cells = cell_count(geom)
+            _bench(
+                "TileDB",
+                lambda c, v: tiledb.point_query(c, v),
+                lambda lo, hi, v: tiledb.range_query_var(lo, hi, v),
+                lambda cells: geom.extract_submesh(cells),
+                lambda mesh, v, val: geom.isosurface_extraction(v, val),
+                n_cells,
+                max_diffs_tiledb,
+                cfg.duration_sec,
+                variables,
+            )
+        finally:
+            tiledb.close()
+
     max_diffs = None
-    if legacy_backends:
+    if "vtk" in backends:
         delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
         if delta_file is None:
-            print(
-                f"W3: no sidecar max_diffs for {ship} step {step}; "
-                f"skip {', '.join(sorted(legacy_backends))}"
-            )
+            print(f"W3: no sidecar max_diffs for {ship} step {step}; skip vtk")
         else:
             max_diffs = read_max_diffs(delta_file)
-
-    if "tiledb" in backends and max_diffs is not None:
-        tiledb = make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship))
-        geom = make_geom_client(cfg, ship, step, tiledb, cfg.fluid_zone(ship))
-        n_cells = cell_count(geom)
-        _bench(
-            "TileDB",
-            lambda c, v: tiledb.point_query(c, v),
-            lambda lo, hi, v: tiledb.range_query_var(lo, hi, v),
-            lambda cells: geom.extract_submesh(cells),
-            lambda mesh, v, val: geom.isosurface_extraction(v, val),
-            n_cells,
-            max_diffs,
-            cfg.duration_sec,
-            variables,
-        )
-        tiledb.close()
 
     if "vtk" in backends and max_diffs is not None:
         vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))

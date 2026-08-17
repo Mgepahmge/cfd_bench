@@ -172,4 +172,52 @@ def write_dense_by_id(uri: str, data: dict, dim_name: str, ctx: Optional[tiledb.
     if n is None:
         return
     with tiledb.open(uri, mode="w", ctx=c) as A:
-        A[np.arange(n, dtype=np.int32)] = data
+        # Full-domain dense write.  Using a NumPy coordinate vector here relies
+        # on fancy indexing that is not supported consistently for DenseArray.
+        A[:] = data
+
+
+def schema_source_labels(count: int, dim_name: str, ctx: Optional[tiledb.Ctx] = None) -> tiledb.ArraySchema:
+    """Dense source-label mapping for H5 node/cell ids."""
+    c = _ctx(ctx)
+    n = max(0, int(count) - 1)
+    dom = tiledb.Domain(
+        tiledb.Dim(dim_name, (0, n), tile=_tile(count), dtype=np.int32, ctx=c),
+        ctx=c,
+    )
+    attrs = [tiledb.Attr("source_label", dtype=np.int64, ctx=c)]
+    return tiledb.ArraySchema(domain=dom, attrs=attrs, sparse=False, ctx=c)
+
+
+def schema_cell_source(cell_count: int, ctx: Optional[tiledb.Ctx] = None) -> tiledb.ArraySchema:
+    """H5 source element label plus compact element-type code."""
+    c = _ctx(ctx)
+    n = max(0, int(cell_count) - 1)
+    dom = tiledb.Domain(
+        tiledb.Dim("cell_id", (0, n), tile=_tile(cell_count), dtype=np.int32, ctx=c),
+        ctx=c,
+    )
+    attrs = [
+        tiledb.Attr("source_label", dtype=np.int64, ctx=c),
+        tiledb.Attr("element_type_code", dtype=np.int32, ctx=c),
+    ]
+    return tiledb.ArraySchema(domain=dom, attrs=attrs, sparse=False, ctx=c)
+
+
+def schema_h5_dataset_meta(ctx: Optional[tiledb.Ctx] = None) -> tiledb.ArraySchema:
+    """Small numeric anchor array; string/list metadata is stored in Array.meta."""
+    c = _ctx(ctx)
+    dom = tiledb.Domain(tiledb.Dim("meta_id", (0, 0), tile=1, dtype=np.int32, ctx=c), ctx=c)
+    attrs = [
+        tiledb.Attr("is_h5", dtype=np.uint8, ctx=c),
+        tiledb.Attr("node_count", dtype=np.int64, ctx=c),
+        tiledb.Attr("cell_count", dtype=np.int64, ctx=c),
+    ]
+    return tiledb.ArraySchema(domain=dom, attrs=attrs, sparse=False, ctx=c)
+
+
+def schema_max_diff(var_names: Sequence[str], ctx: Optional[tiledb.Ctx] = None) -> tiledb.ArraySchema:
+    c = _ctx(ctx)
+    dom = tiledb.Domain(tiledb.Dim("meta_id", (0, 0), tile=1, dtype=np.int32, ctx=c), ctx=c)
+    attrs = [tiledb.Attr(str(v), dtype=np.float64, ctx=c) for v in var_names]
+    return tiledb.ArraySchema(domain=dom, attrs=attrs, sparse=False, ctx=c)

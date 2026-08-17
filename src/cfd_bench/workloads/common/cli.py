@@ -43,7 +43,7 @@ def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--max-range-dir",
         default=resolve_max_range_dir(),
-        help="Legacy W3 sidecar directory for non-PostgreSQL backends",
+        help="Legacy W3 sidecar directory for old IoTDB/TileDB/VTK ingests",
     )
 
 
@@ -96,6 +96,29 @@ def workload_config_from_args(args, datasets=None, ships=None) -> WorkloadConfig
         for info in infos:
             # PostgreSQL discovery wins when both backends are selected.  This
             # keeps the stable PostgreSQL runtime configuration unchanged.
+            discovered_steps.setdefault(info.dataset_key, list(info.timesteps))
+            discovered_variables.setdefault(info.dataset_key, list(info.variables))
+            discovered_zones.setdefault(info.dataset_key, info.zone_type)
+
+    needs_tiledb_discovery = "tiledb" in backends and (
+        explicit_steps is None
+        or explicit_variables is None
+        or explicit_zone is None
+    )
+    if needs_tiledb_discovery:
+        try:
+            from cfd_bench.infra.tiledb.config import TileDBConfig
+            from cfd_bench.infra.tiledb.discovery import discover_tiledb_datasets
+
+            infos = discover_tiledb_datasets(
+                requested_ships,
+                config=TileDBConfig(root_path=args.tiledb_root),
+            )
+        except Exception:
+            infos = []
+        for info in infos:
+            # Frozen PostgreSQL/IoTDB discovery has priority when multiple
+            # backends are selected; TileDB only fills missing runtime metadata.
             discovered_steps.setdefault(info.dataset_key, list(info.timesteps))
             discovered_variables.setdefault(info.dataset_key, list(info.variables))
             discovered_zones.setdefault(info.dataset_key, info.zone_type)

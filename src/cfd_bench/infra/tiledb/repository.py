@@ -13,6 +13,10 @@ class TileDBRepository:
     def __init__(self, config: Optional[TileDBConfig] = None, ctx: Optional[tiledb.Ctx] = None):
         self.config = config or TileDBConfig()
         self.ctx = ctx or tiledb.Ctx()
+        self._h5_meta_cache: Dict[str, Dict[str, object]] = {}
+        self._h5_steps_cache: Dict[str, List[int]] = {}
+        self._node_source_cache: Dict[Tuple[str, str], np.ndarray] = {}
+        self._cell_source_cache: Dict[Tuple[str, str], np.ndarray] = {}
 
     # -------------------- path helpers --------------------
     def _base(self, dataset_key: str) -> str:
@@ -22,7 +26,8 @@ class TileDBRepository:
         return os.path.join(self._base(dataset_key), "mesh_static", zone, f"{leaf}.tdb")
 
     def path_cell_vars(self, dataset_key: str, step: int, zone: str = "0_Fluid") -> str:
-        if zone in ("1_Hull", "hull"):
+        z = str(zone or "0_Fluid").strip().lower()
+        if "hull" in z or "wall" in z or z in ("1_hull", "hull"):
             return os.path.join(
                 self._base(dataset_key), "post_processing", f"step_{int(step)}", "cell_vars_hull.tdb"
             )
@@ -33,6 +38,9 @@ class TileDBRepository:
 
     def path_derived(self, dataset_key: str, step: int, leaf: str) -> str:
         return os.path.join(self._base(dataset_key), "derived", f"step_{int(step)}", f"{leaf}.tdb")
+
+    def path_h5_metadata(self, dataset_key: str, leaf: str = "dataset_meta") -> str:
+        return os.path.join(self._base(dataset_key), "h5_metadata", f"{leaf}.tdb")
 
     def array_exists(self, uri: str) -> bool:
         return tiledb.array_exists(uri, ctx=self.ctx)
@@ -294,6 +302,288 @@ class TileDBRepository:
             if qf >= float(tau):
                 out.append((int(cid), qf))
         out.sort(key=lambda x: -x[1])
+        return out
+
+    # -------------------- H5 metadata / W9-W11 --------------------
+    @staticmethod
+    def _meta_text(value, default: str = "") -> str:
+        if value is None:
+            return default
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    @staticmethod
+    def _array_attr_names(A) -> List[str]:
+        try:
+            return [A.schema.attr(i).name for i in range(A.schema.nattr)]
+        except Exception:
+            try:
+                return [x.name for x in A.schema]
+            except Exception:
+                return []
+
+    def h5_dataset_metadata(self, dataset_key: str) -> Dict[str, object]:
+        if dataset_key in self._h5_meta_cache:
+            return dict(self._h5_meta_cache[dataset_key])
+        uri = self.path_h5_metadata(dataset_key)
+        if not self.array_exists(uri):
+            return {}
+        with self.open_array(uri, "r") as A:
+            data = A[0]
+            def scalar(name, default=0):
+                try:
+                    v = data[name]
+                    arr = np.asarray(v).reshape(-1)
+                    return arr[0] if arr.size else default
+                except Exception:
+                    return default
+            def m(name, default=""):
+                try:
+                    return self._meta_text(A.meta[name], default)
+                except Exception:
+                    return default
+            def csv(name):
+                return tuple(x for x in (p.strip().upper() for p in m(name).split(",")) if x)
+            result = {
+                "is_h5": bool(int(scalar("is_h5", 0))),
+                "zone": m("zone", "0_Fluid"),
+                "part_name": m("part_name"),
+                "instance_name": m("instance_name"),
+                "variables": csv("variables_csv"),
+                "nodal_variables": csv("nodal_variables_csv"),
+                "common_variables": csv("common_variables_csv"),
+                "common_nodal_variables": csv("common_nodal_variables_csv"),
+                "element_types": tuple(x for x in m("element_types_csv").split(",") if x),
+                "timesteps": tuple(int(x) for x in m("timesteps_csv").split(",") if x.strip()),
+                "node_count": int(scalar("node_count", 0)),
+                "cell_count": int(scalar("cell_count", 0)),
+            }
+        self._h5_meta_cache[dataset_key] = dict(result)
+        return result
+
+    def h5_frame_timesteps(self, dataset_key: str) -> List[int]:
+        if dataset_key in self._h5_steps_cache:
+            return list(self._h5_steps_cache[dataset_key])
+        meta = self.h5_dataset_metadata(dataset_key)
+        steps = [int(x) for x in meta.get("timesteps", ())]
+        if not steps:
+            root = os.path.join(self._base(dataset_key), "post_processing")
+            if os.path.isdir(root):
+                for name in os.listdir(root):
+                    if name.startswith("step_"):
+                        try:
+                            steps.append(int(name.split("_", 1)[1]))
+                        except ValueError:
+                            pass
+        result = sorted(set(steps))
+        self._h5_steps_cache[dataset_key] = list(result)
+        return result
+
+    def is_h5_dataset(self, dataset_key: str) -> bool:
+        try:
+            return bool(self.h5_dataset_metadata(dataset_key).get("is_h5"))
+        except Exception:
+            return False
+
+    def fetch_var_value_range(
+        self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"
+    ) -> Tuple[float, float]:
+        uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
+        with self.open_array(uri, "r") as A:
+            try:
+                data = A.query(attrs=[str(var)])[:]
+            except Exception:
+                data = A[:]
+            arr = np.asarray(data[str(var)], dtype=np.float64).reshape(-1)
+        arr = arr[np.isfinite(arr)]
+        if not arr.size:
+            raise ValueError(f"no values for {dataset_key} step={step} var={var}")
+        return float(np.min(arr)), float(np.max(arr))
+
+    def fetch_max_diffs(
+        self, dataset_key: str, step: int, variables: Sequence[str]
+    ) -> Dict[str, float]:
+        uri = self.path_derived(dataset_key, step, "max_diff")
+        if not self.array_exists(uri):
+            return {}
+        wanted = [str(v).upper() for v in variables]
+        with self.open_array(uri, "r") as A:
+            attrs = set(self._array_attr_names(A))
+            selected = [v for v in wanted if not attrs or v in attrs]
+            if not selected:
+                return {}
+            try:
+                data = A.query(attrs=selected)[0]
+            except Exception:
+                data = A[0]
+            out: Dict[str, float] = {}
+            for var in selected:
+                try:
+                    arr = np.asarray(data[var], dtype=np.float64).reshape(-1)
+                    if arr.size and np.isfinite(arr[0]):
+                        out[var] = float(arr[0])
+                except Exception:
+                    continue
+            return out
+
+    def _source_labels(self, dataset_key: str, zone: str, kind: str) -> np.ndarray:
+        cache = self._node_source_cache if kind == "node" else self._cell_source_cache
+        key = (dataset_key, zone)
+        if key in cache:
+            return cache[key]
+        leaf = "node_source" if kind == "node" else "cell_source"
+        uri = self.path_mesh_static(dataset_key, zone, leaf)
+        with self.open_array(uri, "r") as A:
+            data = A.query(attrs=["source_label"])[:] if hasattr(A, "query") else A[:]
+            arr = np.asarray(data["source_label"], dtype=np.int64).reshape(-1)
+        cache[key] = arr
+        return arr
+
+    def fetch_h5_element_labels(
+        self, dataset_key: str, zone: str, dense_cell_ids: Sequence[int]
+    ) -> List[int]:
+        ids = np.asarray([int(x) for x in dense_cell_ids], dtype=np.int64)
+        if not ids.size:
+            return []
+        labels = self._source_labels(dataset_key, zone, "cell")
+        valid = ids[(ids >= 0) & (ids < len(labels))]
+        return sorted(int(x) for x in labels[valid])
+
+    def fetch_h5_element_ids_in_coordinate_range(
+        self, dataset_key: str, zone: str, lower: Sequence[float], upper: Sequence[float]
+    ) -> List[int]:
+        lo = np.asarray(lower, dtype=np.float64).reshape(3)
+        hi = np.asarray(upper, dtype=np.float64).reshape(3)
+        uri = self.path_mesh_static(dataset_key, zone, "cells")
+        dense_ids: np.ndarray
+        with self.open_array(uri, "r") as A:
+            cond = (
+                f"cx >= {float(lo[0])} and cx <= {float(hi[0])} and "
+                f"cy >= {float(lo[1])} and cy <= {float(hi[1])} and "
+                f"cz >= {float(lo[2])} and cz <= {float(hi[2])}"
+            )
+            try:
+                result = A.query(attrs=[], dims=["cell_id"], cond=cond)[:]
+                dense_ids = np.asarray(result["cell_id"], dtype=np.int64).reshape(-1)
+            except Exception:
+                data = A.query(attrs=["cx", "cy", "cz"])[:] if hasattr(A, "query") else A[:]
+                x = np.asarray(data["cx"], dtype=np.float64).reshape(-1)
+                y = np.asarray(data["cy"], dtype=np.float64).reshape(-1)
+                z = np.asarray(data["cz"], dtype=np.float64).reshape(-1)
+                mask = (
+                    (x >= lo[0]) & (x <= hi[0]) &
+                    (y >= lo[1]) & (y <= hi[1]) &
+                    (z >= lo[2]) & (z <= hi[2])
+                )
+                dense_ids = np.flatnonzero(mask)
+        return self.fetch_h5_element_labels(dataset_key, zone, dense_ids)
+
+    def fetch_h5_point_ids(self, dataset_key: str, zone: str) -> List[int]:
+        return sorted(int(x) for x in self._source_labels(dataset_key, zone, "node"))
+
+    def _dense_node_ids_for_source_labels(
+        self, dataset_key: str, zone: str, source_labels: Sequence[int]
+    ) -> Dict[int, int]:
+        wanted = {int(x) for x in source_labels}
+        if not wanted:
+            return {}
+        labels = self._source_labels(dataset_key, zone, "node")
+        return {int(label): int(i) for i, label in enumerate(labels) if int(label) in wanted}
+
+    def _read_attr_at_dense_ids(self, uri: str, var: str, dim_name: str, ids: Sequence[int]):
+        ids = sorted(set(int(x) for x in ids))
+        if not ids:
+            return {}
+        with self.open_array(uri, "r") as A:
+            cond = " or ".join(f"{dim_name} == {x}" for x in ids)
+            try:
+                result = A.query(attrs=[var], dims=[dim_name], cond=cond)[:]
+                coords = np.asarray(result[dim_name], dtype=np.int64).reshape(-1)
+                vals = np.asarray(result[var], dtype=np.float64).reshape(-1)
+                return {int(i): float(v) for i, v in zip(coords, vals)}
+            except Exception:
+                try:
+                    data = A.query(attrs=[var])[:]
+                except Exception:
+                    data = A[:]
+                arr = np.asarray(data[var], dtype=np.float64).reshape(-1)
+                return {i: float(arr[i]) for i in ids if 0 <= i < len(arr)}
+
+    def fetch_h5_point_frame_extrema(
+        self, dataset_key: str, zone: str, source_labels: Sequence[int], var: str
+    ) -> Dict[int, Tuple[float, float]]:
+        mapping = self._dense_node_ids_for_source_labels(dataset_key, zone, source_labels)
+        if not mapping:
+            return {}
+        dense_to_source = {dense: src for src, dense in mapping.items()}
+        mins = {src: np.inf for src in mapping}
+        maxs = {src: -np.inf for src in mapping}
+        for step in self.h5_frame_timesteps(dataset_key):
+            uri = self.path_node_vars(dataset_key, step)
+            if not self.array_exists(uri):
+                continue
+            try:
+                values = self._read_attr_at_dense_ids(uri, str(var).upper(), "node_id", dense_to_source)
+            except Exception:
+                continue
+            for dense_id, value in values.items():
+                if dense_id not in dense_to_source or not np.isfinite(value):
+                    continue
+                src = dense_to_source[dense_id]
+                mins[src] = min(mins[src], value)
+                maxs[src] = max(maxs[src], value)
+        return {
+            src: (float(mins[src]), float(maxs[src]))
+            for src in mapping
+            if np.isfinite(mins[src]) and np.isfinite(maxs[src])
+        }
+
+    def fetch_frame_statistics(
+        self, dataset_key: str, zone: str, step: int, attribute_name: Optional[str] = None
+    ) -> Dict[str, Dict[str, object]]:
+        meta = self.h5_dataset_metadata(dataset_key)
+        variables = [str(v).upper() for v in meta.get("variables", ())]
+        nodal = {str(v).upper() for v in meta.get("nodal_variables", ())}
+        if attribute_name is not None:
+            wanted = str(attribute_name).upper()
+            variables = [wanted] if wanted in variables else []
+        out: Dict[str, Dict[str, object]] = {}
+        for var in variables:
+            candidates = []
+            if var in nodal:
+                candidates.append(("node", self.path_node_vars(dataset_key, step)))
+            candidates.append(("cell", self.path_cell_vars(dataset_key, step, zone)))
+            for position, uri in candidates:
+                if not self.array_exists(uri):
+                    continue
+                try:
+                    with self.open_array(uri, "r") as A:
+                        attrs = set(self._array_attr_names(A))
+                        if attrs and var not in attrs:
+                            continue
+                        try:
+                            data = A.query(attrs=[var])[:]
+                        except Exception:
+                            data = A[:]
+                        arr = np.asarray(data[var], dtype=np.float64).reshape(-1)
+                except Exception:
+                    continue
+                arr = arr[np.isfinite(arr)]
+                if not arr.size:
+                    continue
+                out[var] = {
+                    "position": position,
+                    "count": int(arr.size),
+                    "min": float(np.min(arr)),
+                    "max": float(np.max(arr)),
+                    "mean": float(np.mean(arr)),
+                    "stddev": float(np.std(arr)),
+                }
+                break
+        if not out:
+            suffix = f" variable={attribute_name}" if attribute_name else ""
+            raise ValueError(f"no values for frame={step}{suffix}")
         return out
 
     def list_mesh_static_zones(self, dataset_key: str):

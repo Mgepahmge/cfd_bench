@@ -119,3 +119,91 @@ def write_cell_vars(uri: str, var_data: dict, cell_count: int, var_names: Sequen
     ensure_parent(uri)
     schema.create_dense_array(uri, schema.schema_cell_vars(cell_count, var_names, ctx), overwrite=overwrite, ctx=ctx)
     schema.write_dense_by_id(uri, {k: np.asarray(v, dtype=np.float32) for k, v in var_data.items()}, "cell_id", ctx=ctx)
+
+
+def h5_metadata_uri(root: str, dataset_key: str, leaf: str = "dataset_meta") -> str:
+    return os.path.join(root, dataset_key, "h5_metadata", f"{leaf}.tdb")
+
+
+def write_node_vars(uri: str, var_data: dict, node_count: int, var_names: Sequence[str], ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
+    ensure_parent(uri)
+    schema.create_dense_array(uri, schema.schema_node_vars(node_count, var_names, ctx), overwrite=overwrite, ctx=ctx)
+    schema.write_dense_by_id(uri, {k: np.asarray(v, dtype=np.float32) for k, v in var_data.items()}, "node_id", ctx=ctx)
+
+
+def write_source_labels(uri: str, labels, *, dim_name: str, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
+    values = np.asarray(labels, dtype=np.int64)
+    ensure_parent(uri)
+    schema.create_dense_array(
+        uri,
+        schema.schema_source_labels(len(values), dim_name, ctx),
+        overwrite=overwrite,
+        ctx=ctx,
+    )
+    schema.write_dense_by_id(uri, {"source_label": values}, dim_name, ctx=ctx)
+
+
+def write_cell_source(uri: str, labels, element_types, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
+    import json
+
+    labels = np.asarray(labels, dtype=np.int64)
+    types = [str(x) for x in element_types]
+    unique = sorted(set(types))
+    type_to_code = {name: i for i, name in enumerate(unique)}
+    codes = np.asarray([type_to_code[name] for name in types], dtype=np.int32)
+    ensure_parent(uri)
+    schema.create_dense_array(uri, schema.schema_cell_source(len(labels), ctx), overwrite=overwrite, ctx=ctx)
+    schema.write_dense_by_id(
+        uri,
+        {"source_label": labels, "element_type_code": codes},
+        "cell_id",
+        ctx=ctx,
+    )
+    c = ctx if ctx is not None else tiledb.Ctx()
+    with tiledb.open(uri, mode="w", ctx=c) as A:
+        A.meta["element_types_json"] = json.dumps(unique, ensure_ascii=True)
+
+
+def write_h5_dataset_meta(uri: str, meta: dict, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
+    """Persist H5 discovery metadata in a TileDB anchor array.
+
+    TileDB Array metadata is used for strings/lists so this stays compatible
+    across TileDB-Py versions without depending on variable-length string attrs.
+    """
+    import json
+
+    ensure_parent(uri)
+    schema.create_dense_array(uri, schema.schema_h5_dataset_meta(ctx), overwrite=overwrite, ctx=ctx)
+    schema.write_dense_by_id(
+        uri,
+        {
+            "is_h5": np.asarray([1 if meta.get("is_h5", True) else 0], dtype=np.uint8),
+            "node_count": np.asarray([int(meta.get("node_count", 0))], dtype=np.int64),
+            "cell_count": np.asarray([int(meta.get("cell_count", 0))], dtype=np.int64),
+        },
+        "meta_id",
+        ctx=ctx,
+    )
+    c = ctx if ctx is not None else tiledb.Ctx()
+    with tiledb.open(uri, mode="w", ctx=c) as A:
+        for key in (
+            "zone", "part_name", "instance_name", "variables_csv",
+            "nodal_variables_csv", "common_variables_csv",
+            "common_nodal_variables_csv", "element_types_csv", "timesteps_csv",
+        ):
+            A.meta[key] = str(meta.get(key, ""))
+        A.meta["frames_json"] = json.dumps(meta.get("frames", []), ensure_ascii=True)
+
+
+def write_max_diffs(uri: str, values: dict, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
+    names = [str(v).upper() for v in sorted(values)]
+    if not names:
+        return
+    ensure_parent(uri)
+    schema.create_dense_array(uri, schema.schema_max_diff(names, ctx), overwrite=overwrite, ctx=ctx)
+    schema.write_dense_by_id(
+        uri,
+        {name: np.asarray([float(values[name])], dtype=np.float64) for name in names},
+        "meta_id",
+        ctx=ctx,
+    )

@@ -5,4 +5,6 @@ required_caps:
   - node_vars
 backends:
   - postgresql
+  - iotdb
+  - tiledb
 allow_vtk_baseline: false
