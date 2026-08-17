@@ -164,43 +164,124 @@ class IoTDBMeshClient(AbstractContextManager):
         return iotdb_isosurface_extraction(data, scalar_map, float(iso_value))
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
-        # W6 lightweight path: return normals from pre-stored boundary_faces (algorithm step 1)
+        # W6 database-geometry path.  Prefer persisted CFD boundary faces and
+        # fall back to a topology-derived per-cell normal for H5/structural
+        # meshes that do not have a separate boundary-face device.
         if mesh_handle is None:
-            ctx = self._require_ctx()
-            bf = self.repo.fetch_boundary_faces(ctx.dataset_key, ctx.zone)
-            if not bf:
-                raise RuntimeError(f"No boundary_faces data for {ctx.dataset_key} zone={ctx.zone}")
-            # Aggregate per-cell: area-weighted average normal (matches PG fetch_boundary_normals logic)
-            cell_norms: dict = {}
-            for cid, _patch, nx, ny, nz, area, *_cx_cy_cz in bf:
-                area_f = float(area)
-                prev = cell_norms.get(int(cid))
-                if prev is None:
-                    cell_norms[int(cid)] = [float(nx) * area_f, float(ny) * area_f, float(nz) * area_f, area_f]
-                else:
-                    prev[0] += float(nx) * area_f
-                    prev[1] += float(ny) * area_f
-                    prev[2] += float(nz) * area_f
-                    prev[3] += area_f
-            sorted_cids = sorted(cell_norms.keys())
-            norms = np.array(
-                [[cell_norms[c][0] / max(cell_norms[c][3], 1e-15),
-                  cell_norms[c][1] / max(cell_norms[c][3], 1e-15),
-                  cell_norms[c][2] / max(cell_norms[c][3], 1e-15)]
-                 for c in sorted_cids],
-                dtype=np.float64,
-            )
-            # Normalize each row to unit length
-            lengths = np.linalg.norm(norms, axis=1, keepdims=True)
-            lengths = np.maximum(lengths, 1e-15)
-            norms = norms / lengths
-            return norms
+            _, normals = self.surface_cells_and_normals()
+            return normals
         # Fallback: compute from submesh (isosurface / other workloads)
         if isinstance(mesh_handle, LitePolyData):
             return iotdb_surface_norm(mesh_handle)
         if isinstance(mesh_handle, LiteMesh):
             return iotdb_surface_norm_from_mesh(mesh_handle)
         raise TypeError("IoTDB surface_norm requires LiteMesh or LitePolyData")
+
+    @staticmethod
+    def _normal_from_points(points: Sequence[Sequence[float]]) -> np.ndarray:
+        """Return a deterministic unit normal for 1D/2D/3D element points.
+
+        W6 only needs a stable vector to complete the integration workload.
+        For true surface cells we use a geometric cross product.  Beam/line
+        elements have no unique surface normal, so choose a reproducible
+        perpendicular vector.  This intentionally favors workload
+        availability over strict physical interpretation.
+        """
+        pts = [np.asarray(p, dtype=np.float64) for p in points]
+        if len(pts) >= 3:
+            p0 = pts[0]
+            for i in range(1, len(pts) - 1):
+                for j in range(i + 1, len(pts)):
+                    n = np.cross(pts[i] - p0, pts[j] - p0)
+                    length = float(np.linalg.norm(n))
+                    if length > 1e-15:
+                        return n / length
+        if len(pts) >= 2:
+            tangent = pts[1] - pts[0]
+            length = float(np.linalg.norm(tangent))
+            if length > 1e-15:
+                tangent = tangent / length
+                axes = np.eye(3, dtype=np.float64)
+                axis = axes[int(np.argmin(np.abs(axes @ tangent)))]
+                n = np.cross(tangent, axis)
+                nlen = float(np.linalg.norm(n))
+                if nlen > 1e-15:
+                    return n / nlen
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+
+    def surface_cells_and_normals(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return cell ids aligned with normals for IoTDB-native W6.
+
+        Legacy CFD datasets persist explicit ``boundary_faces``.  H5 datasets
+        currently persist only mesh topology, so they use a generic per-cell
+        geometry fallback.  The returned cell ids are explicit because
+        boundary-face owners are not necessarily ``0..N-1``.
+        """
+        ctx = self._require_ctx()
+        boundary = self.repo.fetch_boundary_faces(ctx.dataset_key, ctx.zone)
+        if boundary:
+            cell_norms = {}
+            for cid, _patch, nx, ny, nz, area, *_center in boundary:
+                area_f = max(abs(float(area)), 1e-15)
+                acc = cell_norms.setdefault(int(cid), np.zeros(4, dtype=np.float64))
+                acc[:3] += np.array([nx, ny, nz], dtype=np.float64) * area_f
+                acc[3] += area_f
+            cell_ids = np.asarray(sorted(cell_norms), dtype=np.int32)
+            normals = []
+            for cid in cell_ids:
+                acc = cell_norms[int(cid)]
+                n = acc[:3] / max(float(acc[3]), 1e-15)
+                length = float(np.linalg.norm(n))
+                normals.append(n / length if length > 1e-15 else np.array([1.0, 0.0, 0.0]))
+            return cell_ids, np.asarray(normals, dtype=np.float64)
+
+        data = self.runtime.ensure_cell_nodes(ctx.dataset_key, ctx.zone)
+        cell_ids = np.asarray(sorted(data.cells), dtype=np.int32)
+        normals = []
+        for cid in cell_ids:
+            node_ids = data.cell_nodes.get(int(cid), [])
+            points = [data.nodes[nid] for nid in node_ids if nid in data.nodes]
+            normals.append(self._normal_from_points(points))
+        if not normals:
+            return cell_ids, np.zeros((0, 3), dtype=np.float64)
+        return cell_ids, np.asarray(normals, dtype=np.float64)
+
+    def resolve_w6_scalar(self, candidates: Sequence[str] = ("P", "U", "V", "W", "K", "E")) -> str:
+        """Choose an available cell scalar for W6, preferring pressure.
+
+        Original CFD data normally resolves to ``P``.  Structural H5 data may
+        have only displacement components, in which case W6 still runs using
+        the first available component as a force-like scalar benchmark.
+        """
+        ctx = self._require_ctx()
+        ordered = []
+        for name in candidates:
+            var = str(name).strip().upper()
+            if var and var not in ordered:
+                ordered.append(var)
+        if self.repo.is_h5_dataset(ctx.dataset_key):
+            try:
+                meta = self.repo.h5_dataset_metadata(ctx.dataset_key)
+                for name in meta.get("common_variables", ()):
+                    var = str(name).strip().upper()
+                    if var and var not in ordered:
+                        ordered.append(var)
+            except Exception:
+                pass
+        for var in ordered:
+            try:
+                path = self.repo.resolve_cell_var_path(
+                    ctx.dataset_key, ctx.step, zone=ctx.zone, probe_var=var
+                )
+                rows = self.repo.query_rows(f"SELECT {var} FROM {path} LIMIT 1;")
+                if rows:
+                    return var
+            except Exception:
+                continue
+        raise RuntimeError(
+            f"No usable IoTDB cell scalar for W6: dataset={ctx.dataset_key} "
+            f"step={ctx.step} zone={ctx.zone} candidates={ordered}"
+        )
 
     def compute_qcriterion_roi(
         self,
@@ -213,8 +294,25 @@ class IoTDBMeshClient(AbstractContextManager):
         ts = ctx.step if step is None else int(step)
         data = self.runtime.ensure_adjacency(ctx.dataset_key, ctx.zone)
         roi_ids = self.range_query_coord(lower_bound, upper_bound)
-        vel_map = self.repo.fetch_velocity_map(ctx.dataset_key, ts, roi_ids, zone=ctx.zone)
-        cell_ids, qvals = compute_qcriterion_roi(data, roi_ids, vel_map, tau=tau)
+        # Q at ROI boundary cells needs neighbor velocities outside the ROI.
+        # Expand one adjacency halo before fetching U/V/W.  For low-dimensional
+        # structural meshes allow rank-deficient least-squares and emit Q=0
+        # when a gradient cannot be estimated; this keeps W7 executable while
+        # retaining the normal 3-D calculation for CFD meshes.
+        needed = {int(cid) for cid in roi_ids}
+        for cid in list(needed):
+            needed.update(int(nb) for nb in data.adjacency.get(cid, []))
+        vel_map = self.repo.fetch_velocity_map(
+            ctx.dataset_key, ts, sorted(needed), zone=ctx.zone
+        )
+        cell_ids, qvals = compute_qcriterion_roi(
+            data,
+            roi_ids,
+            vel_map,
+            tau=tau,
+            min_neighbors=1,
+            fallback_zero=True,
+        )
         return np.array(cell_ids, dtype=np.int32), np.array(qvals, dtype=np.float64)
 
     def var_value_range(

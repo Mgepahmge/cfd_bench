@@ -179,15 +179,25 @@ class IoTDBRepository:
         norm_ids = [int(i) for i in cell_ids]
         if not norm_ids:
             return {}
-        idx = ",".join(str(i) for i in norm_ids)
         path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var="U")
-        sql = f"SELECT U,V,W FROM {path} WHERE Time IN ({idx});"
-        rows = self.query_rows(sql)
-        return {
-            cid: (_to_float(vals[0]), _to_float(vals[1]), _to_float(vals[2]))
-            for cid, vals in rows
-            if len(vals) >= 3
-        }
+        # Large ROIs can make a single ``Time IN (...)`` query too long for
+        # some IoTDB server/client versions.  Chunking also makes W7's halo
+        # expansion safe on large CFD meshes without changing the schema.
+        out: Dict[int, Tuple[float, float, float]] = {}
+        chunk = 5000
+        for start in range(0, len(norm_ids), chunk):
+            ids = norm_ids[start : start + chunk]
+            idx = ",".join(str(i) for i in ids)
+            sql = f"SELECT U,V,W FROM {path} WHERE Time IN ({idx});"
+            for cid, vals in self.query_rows(sql):
+                if len(vals) < 3:
+                    continue
+                out[int(cid)] = (
+                    _to_float(vals[0]),
+                    _to_float(vals[1]),
+                    _to_float(vals[2]),
+                )
+        return out
 
     # -------------------- mesh static --------------------
     def fetch_cells(self, dataset_key: str, zone: str) -> Dict[int, Tuple[float, ...]]:
@@ -299,18 +309,53 @@ class IoTDBRepository:
             )
         return out
 
-    def fetch_boundary_faces(self, dataset_key: str, zone: str, patch_name: str = "*") -> List[Tuple[int, float, float, float, float]]:
+    def fetch_boundary_faces(
+        self, dataset_key: str, zone: str, patch_name: str = "*"
+    ) -> List[Tuple[int, float, float, float, float, float, float, float, float]]:
+        """Read legacy CFD boundary-face rows.
+
+        ``load_topology.py`` stores boundary faces with the face-row index as
+        IoTDB Time and the *owning cell id* in the ``cell_id`` measurement.
+        Older code incorrectly treated Time as cell_id and queried a
+        non-existent ``patch_name`` field even though ingest writes
+        ``patch_code``.  W6 therefore could not use IoTDB-native geometry
+        reliably.  Keep the persisted layout unchanged and read it correctly.
+        """
         path = self.path_mesh_static(dataset_key, zone, "boundary_faces")
-        sql = f"SELECT nx,ny,nz,area,patch_name FROM {path};"
-        rows = self.query_rows(sql)
-        out: List[Tuple[int, float, float, float, float]] = []
-        for cid, vals in rows:
-            if len(vals) < 5:
+        sql = f"SELECT cell_id,patch_code,nx,ny,nz,area,cx,cy,cz FROM {path};"
+        try:
+            rows = self.query_rows(sql)
+        except Exception:
+            return []
+        out: List[Tuple[int, float, float, float, float, float, float, float, float]] = []
+        for _face_row, vals in rows:
+            if len(vals) < 9:
                 continue
-            p = vals[4] or ""
-            if patch_name != "*" and p != patch_name:
+            cid = _to_int(vals[0], -1)
+            patch_code = _to_float(vals[1], 0.0)
+            if cid < 0:
                 continue
-            out.append((cid, _to_float(vals[0]), _to_float(vals[1]), _to_float(vals[2]), _to_float(vals[3])))
+            if patch_name != "*":
+                # Legacy DAT ingest only has a numeric patch code.  Accept
+                # either the numeric string or the all-patches wildcard.
+                try:
+                    if float(patch_name) != patch_code:
+                        continue
+                except Exception:
+                    continue
+            out.append(
+                (
+                    cid,
+                    patch_code,
+                    _to_float(vals[2]),
+                    _to_float(vals[3]),
+                    _to_float(vals[4]),
+                    _to_float(vals[5]),
+                    _to_float(vals[6]),
+                    _to_float(vals[7]),
+                    _to_float(vals[8]),
+                )
+            )
         return out
 
     # -------------------- H5 metadata / W9-W11 --------------------

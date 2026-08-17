@@ -9,8 +9,15 @@ import numpy as np
 from cfd_bench.core.runtime_mesh import RuntimeMeshData
 
 
-def estimate_gradient_least_squares(center_xyz, center_vel, nb_xyz_list, nb_vel_list):
-    if len(nb_xyz_list) < 3:
+def estimate_gradient_least_squares(
+    center_xyz,
+    center_vel,
+    nb_xyz_list,
+    nb_vel_list,
+    *,
+    min_neighbors: int = 3,
+):
+    if len(nb_xyz_list) < int(min_neighbors):
         return None
     A = []
     dU = []
@@ -23,7 +30,7 @@ def estimate_gradient_least_squares(center_xyz, center_vel, nb_xyz_list, nb_vel_
             continue
         A.append(dx)
         dU.append(du)
-    if len(A) < 3:
+    if len(A) < int(min_neighbors):
         return None
     A = np.array(A, dtype=np.float64)
     dU = np.array(dU, dtype=np.float64)
@@ -45,6 +52,9 @@ def compute_qcriterion_roi(
     roi_cell_ids: Sequence[int],
     velocity_map: Dict[int, Tuple[float, float, float]],
     tau: Optional[float] = None,
+    *,
+    min_neighbors: int = 3,
+    fallback_zero: bool = False,
 ) -> Tuple[List[int], List[float]]:
     """Online Q-criterion for cells in ROI using adjacency + least-squares gradient."""
     centroids = data.cell_centroid
@@ -62,10 +72,19 @@ def compute_qcriterion_roi(
                 continue
             nb_xyz.append(centroids[nb])
             nb_vel.append(velocity_map[nb])
-        G = estimate_gradient_least_squares(cxyz, cvel, nb_xyz, nb_vel)
+        G = estimate_gradient_least_squares(
+            cxyz,
+            cvel,
+            nb_xyz,
+            nb_vel,
+            min_neighbors=min_neighbors,
+        )
         if G is None:
-            continue
-        qc = qcriterion_from_gradient(G)
+            if not fallback_zero:
+                continue
+            qc = 0.0
+        else:
+            qc = qcriterion_from_gradient(G)
         if tau is None or qc >= float(tau):
             qc_rows.append((int(cid), float(qc)))
     cell_ids = [r[0] for r in qc_rows]
