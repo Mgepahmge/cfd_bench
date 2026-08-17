@@ -235,8 +235,16 @@ class IoTDBMeshClient(AbstractContextManager):
                 normals.append(n / length if length > 1e-15 else np.array([1.0, 0.0, 0.0]))
             return cell_ids, np.asarray(normals, dtype=np.float64)
 
+        # ``ensure_cell_nodes`` loads nodes/connectivity only; it does not
+        # populate ``RuntimeMeshData.cells``. W6 enumerates element ids here,
+        # so explicitly load cells as well. Keep a connectivity-union fallback
+        # so partially populated/legacy IoTDB meshes can still execute W6.
+        data = self.runtime.ensure_cells(ctx.dataset_key, ctx.zone)
         data = self.runtime.ensure_cell_nodes(ctx.dataset_key, ctx.zone)
-        cell_ids = np.asarray(sorted(data.cells), dtype=np.int32)
+        cell_ids = np.asarray(
+            sorted(set(data.cells.keys()) | set(data.cell_nodes.keys())),
+            dtype=np.int32,
+        )
         normals = []
         for cid in cell_ids:
             node_ids = data.cell_nodes.get(int(cid), [])

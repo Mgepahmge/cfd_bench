@@ -24,6 +24,9 @@ class _Runtime:
     def __init__(self, data):
         self.data = data
 
+    def ensure_cells(self, dataset, zone):
+        return self.data
+
     def ensure_cell_nodes(self, dataset, zone):
         return self.data
 
@@ -114,6 +117,43 @@ def test_iotdb_boundary_face_reader_uses_persisted_cell_id_and_patch_code():
     assert "cell_id,patch_code" in seen[0]
     assert rows[0][0] == 8
     assert rows[0][5] == 2.5
+
+
+class _SplitLoadRuntime:
+    """Mimic the real MeshRuntime lazy-loading contract."""
+    def __init__(self):
+        self.data = RuntimeMeshData()
+        self.ensure_cells_called = False
+
+    def ensure_cells(self, dataset, zone):
+        self.ensure_cells_called = True
+        self.data.cells = {
+            0: (0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2),
+            1: (1.5, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2),
+        }
+        return self.data
+
+    def ensure_cell_nodes(self, dataset, zone):
+        self.data.nodes = {
+            0: (0.0, 0.0, 0.0),
+            1: (1.0, 0.0, 0.0),
+            2: (2.0, 0.0, 0.0),
+        }
+        self.data.cell_nodes = {0: [0, 1], 1: [1, 2]}
+        return self.data
+
+
+def test_iotdb_w6_fallback_explicitly_loads_cells_like_real_runtime():
+    client = _client_with_ctx()
+    client.repo = _FallbackRepo()
+    runtime = _SplitLoadRuntime()
+    client.runtime = runtime
+
+    ids, normals = client.surface_cells_and_normals()
+
+    assert runtime.ensure_cells_called
+    assert ids.tolist() == [0, 1]
+    assert normals.shape == (2, 3)
 
 class _ScalarRepo:
     def __init__(self, available):
