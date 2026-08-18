@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib
-from typing import Iterable, Sequence, Set
+import time
+from typing import Sequence, Set
 
+from cfd_bench.core.observability import stage
 from cfd_bench.workloads.common.config import WorkloadConfig
 
 DEFAULT_WORKLOADS = ("w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8")
@@ -16,14 +18,26 @@ def run_workload(workload_id: str, cfg: WorkloadConfig, backends: Set[str]) -> N
     if hasattr(mod, "run_ship"):
         for ship in cfg.ships:
             print(f"\n=== {workload_id.upper()} dataset={ship} ===")
-            mod.run_ship(cfg, ship, backends)
+            label = f"{workload_id.upper()} dataset={ship}"
+            stage(label, "start")
+            t0 = time.perf_counter()
+            try:
+                mod.run_ship(cfg, ship, backends)
+            finally:
+                stage(label, f"finished (wall={time.perf_counter() - t0:.3f}s)")
     elif hasattr(mod, "run_ship_step"):
         for ship in cfg.ships:
             for step in cfg.valid_steps(ship):
                 if cfg.skip_step(ship, step):
                     continue
                 print(f"\n=== {workload_id.upper()} dataset={ship} step={step} ===")
-                mod.run_ship_step(cfg, ship, step, backends)
+                label = f"{workload_id.upper()} dataset={ship} step={step}"
+                stage(label, "start")
+                t0 = time.perf_counter()
+                try:
+                    mod.run_ship_step(cfg, ship, step, backends)
+                finally:
+                    stage(label, f"finished (wall={time.perf_counter() - t0:.3f}s)")
     else:
         raise RuntimeError(f"{workload_id}: missing run_ship/run_ship_step")
 

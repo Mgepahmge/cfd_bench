@@ -28,10 +28,18 @@ def aggregation_w2(vals: NDArray[np.float64]):
 
 
 def calculate_force(normals: NDArray[np.float64], pressures: NDArray[np.float64]) -> NDArray[np.float64]:
-    total = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    for i in range(len(normals)):
-        total += float(pressures[i]) * normals[i]
-    return total
+    """Vectorized pressure/normal reduction used by W6.
+
+    The historical Python loop becomes expensive for large hulls.  NumPy's
+    matrix reduction keeps identical arithmetic semantics while moving the hot
+    loop into compiled code.
+    """
+    n = np.asarray(normals, dtype=np.float64)
+    p = np.asarray(pressures, dtype=np.float64).reshape(-1)
+    count = min(len(n), len(p))
+    if count <= 0:
+        return np.zeros(3, dtype=np.float64)
+    return np.asarray(p[:count] @ n[:count], dtype=np.float64)
 
 
 def cal_next_point(current: NDArray[np.float64], velocity: NDArray[np.float64], delta_t: float = 0.01):

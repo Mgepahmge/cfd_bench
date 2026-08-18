@@ -10,6 +10,7 @@ import os
 from typing import Optional, Tuple
 
 from cfd_bench.workloads.common.vtk_files import resolve_vtk_file
+from cfd_bench.core.observability import timed_stage
 
 
 def parse_ship(ship: str) -> Tuple[str, str]:
@@ -23,7 +24,8 @@ def make_iotdb(ship: str, step: int, zone: str = "0_Fluid"):
     from cfd_bench.API.iotdb_api.client import IoTDBMeshClient
 
     client = IoTDBMeshClient()
-    client.connect(ship, step, zone)
+    with timed_stage("IoTDB", f"connect dataset={ship} step={step} zone={zone}"):
+        client.connect(ship, step, zone)
     return client
 
 
@@ -32,7 +34,8 @@ def make_tiledb(ship: str, step: int, root: str, zone: str = "0_Fluid"):
     from cfd_bench.infra.tiledb.config import TileDBConfig
 
     client = TileDBMeshClient(TileDBConfig(root_path=root))
-    client.connect(ship, step, zone)
+    with timed_stage("TileDB", f"connect dataset={ship} step={step} zone={zone}"):
+        client.connect(ship, step, zone)
     return client
 
 
@@ -40,7 +43,8 @@ def make_pg(ship: str, step: int = 200, zone: str = "0_Fluid"):
     from cfd_bench.API.postgresql_api.client import PostgreSQLMeshClient
 
     client = PostgreSQLMeshClient()
-    client.connect(ship, step, zone=zone)
+    with timed_stage("PostgreSQL", f"connect dataset={ship} step={step} zone={zone}"):
+        client.connect(ship, step, zone=zone)
     return client
 
 

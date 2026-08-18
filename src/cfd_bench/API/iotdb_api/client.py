@@ -279,20 +279,24 @@ class IoTDBMeshClient(AbstractContextManager):
         ctx = self._require_ctx()
         boundary = self.repo.fetch_boundary_faces(ctx.dataset_key, ctx.zone)
         if boundary:
-            cell_norms = {}
-            for cid, _patch, nx, ny, nz, area, *_center in boundary:
-                area_f = max(abs(float(area)), 1e-15)
-                acc = cell_norms.setdefault(int(cid), np.zeros(4, dtype=np.float64))
-                acc[:3] += np.array([nx, ny, nz], dtype=np.float64) * area_f
-                acc[3] += area_f
-            cell_ids = np.asarray(sorted(cell_norms), dtype=np.int32)
-            normals = []
-            for cid in cell_ids:
-                acc = cell_norms[int(cid)]
-                n = acc[:3] / max(float(acc[3]), 1e-15)
-                length = float(np.linalg.norm(n))
-                normals.append(n / length if length > 1e-15 else np.array([1.0, 0.0, 0.0]))
-            result = (cell_ids, np.asarray(normals, dtype=np.float64))
+            arr = np.asarray(
+                [(int(cid), float(nx), float(ny), float(nz), max(abs(float(area)), 1e-15))
+                 for cid, _patch, nx, ny, nz, area, *_center in boundary],
+                dtype=np.float64,
+            )
+            order = np.argsort(arr[:, 0], kind="stable")
+            arr = arr[order]
+            raw_ids = arr[:, 0].astype(np.int64)
+            cell_ids64, starts = np.unique(raw_ids, return_index=True)
+            weighted = arr[:, 1:4] * arr[:, 4:5]
+            sums = np.add.reduceat(weighted, starts, axis=0)
+            areas = np.add.reduceat(arr[:, 4], starts)
+            normals = sums / np.maximum(areas[:, None], 1e-15)
+            lengths = np.linalg.norm(normals, axis=1)
+            good = lengths > 1e-15
+            normals[good] /= lengths[good, None]
+            normals[~good] = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            result = (cell_ids64.astype(np.int32), np.asarray(normals, dtype=np.float64))
             self._surface_cells_normals_cache = result
             return result
 
@@ -302,8 +306,9 @@ class IoTDBMeshClient(AbstractContextManager):
         # so partially populated/legacy IoTDB meshes can still execute W6.
         data = self.runtime.ensure_cells(ctx.dataset_key, ctx.zone)
         data = self.runtime.ensure_cell_nodes(ctx.dataset_key, ctx.zone)
+        base_ids = set(int(x) for x in np.asarray(data.all_cell_ids, dtype=np.int64).tolist()) if data.all_cell_ids.size else set(data.cells.keys())
         cell_ids = np.asarray(
-            sorted(set(data.cells.keys()) | set(data.cell_nodes.keys())),
+            sorted(base_ids | set(data.cell_nodes.keys())),
             dtype=np.int32,
         )
         normals = []

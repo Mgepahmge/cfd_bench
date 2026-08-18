@@ -6,7 +6,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from cfd_bench.core.runtime_mesh import RuntimeMeshData
+from cfd_bench.core.runtime_mesh import CellArrayView, RuntimeMeshData
+from cfd_bench.core.observability import timed_stage
 from .repository import TileDBRepository
 
 
@@ -48,27 +49,39 @@ class MeshRuntime:
     def ensure_cells(self, dataset_key: str, zone: str) -> RuntimeMeshData:
         data = self._get_or_init(dataset_key, zone)
         if not data.cells:
-            data.cells = self.repo.fetch_cells(dataset_key, zone)
-            data.invalidate_cell_views()
-            self._build_spatial_index(data)
+            with timed_stage("TileDB mesh", f"load cells + build spatial index dataset={dataset_key} zone={zone}"):
+                if hasattr(self.repo, "fetch_cells_arrays"):
+                    ids, centers, mins, maxs, cell_types = self.repo.fetch_cells_arrays(dataset_key, zone)
+                    data.cells = CellArrayView(ids, centers, mins, maxs, cell_types)
+                    data.all_cell_ids = np.asarray(ids, dtype=np.int32)
+                    data.all_centroids = np.asarray(centers, dtype=np.float64)
+                    data.all_bbox_min = np.asarray(mins, dtype=np.float64)
+                    data.all_bbox_max = np.asarray(maxs, dtype=np.float64)
+                else:
+                    data.cells = self.repo.fetch_cells(dataset_key, zone)
+                data.invalidate_cell_views()
+                self._build_spatial_index(data)
         return data
 
     def ensure_nodes(self, dataset_key: str, zone: str) -> RuntimeMeshData:
         data = self._get_or_init(dataset_key, zone)
         if not data.nodes:
-            data.nodes = self.repo.fetch_nodes(dataset_key, zone)
+            with timed_stage("TileDB mesh", f"load nodes dataset={dataset_key} zone={zone}"):
+                data.nodes = self.repo.fetch_nodes(dataset_key, zone)
         return data
 
     def ensure_cell_nodes(self, dataset_key: str, zone: str) -> RuntimeMeshData:
         data = self.ensure_nodes(dataset_key, zone)
         if not data.cell_nodes:
-            data.cell_nodes = self.repo.fetch_cell_nodes(dataset_key, zone)
+            with timed_stage("TileDB mesh", f"load cell connectivity dataset={dataset_key} zone={zone}"):
+                data.cell_nodes = self.repo.fetch_cell_nodes(dataset_key, zone)
         return data
 
     def ensure_adjacency(self, dataset_key: str, zone: str) -> RuntimeMeshData:
         data = self.ensure_cells(dataset_key, zone)
         if not data.adjacency:
-            data.adjacency = self.repo.fetch_cell_adjacency(dataset_key, zone)
+            with timed_stage("TileDB mesh", f"load adjacency dataset={dataset_key} zone={zone}"):
+                data.adjacency = self.repo.fetch_cell_adjacency(dataset_key, zone)
         return data
 
     def ensure_face_planes(self, dataset_key: str, zone: str) -> RuntimeMeshData:
@@ -90,12 +103,23 @@ class MeshRuntime:
     def _build_spatial_index(data: RuntimeMeshData):
         if not data.cells:
             return
-        items = sorted(data.cells.items(), key=lambda x: x[0])
-        cids = np.fromiter((int(cid) for cid, _ in items), dtype=np.int32, count=len(items))
-        rows = np.asarray([v for _, v in items], dtype=np.float64)
-        centers = rows[:, :3]
-        mins = rows[:, [3, 5, 7]]
-        maxs = rows[:, [4, 6, 8]]
+        if (
+            data.all_cell_ids.size
+            and data.all_centroids.shape == (data.all_cell_ids.size, 3)
+            and data.all_bbox_min.shape == (data.all_cell_ids.size, 3)
+            and data.all_bbox_max.shape == (data.all_cell_ids.size, 3)
+        ):
+            cids = np.asarray(data.all_cell_ids, dtype=np.int32)
+            centers = np.asarray(data.all_centroids, dtype=np.float64)
+            mins = np.asarray(data.all_bbox_min, dtype=np.float64)
+            maxs = np.asarray(data.all_bbox_max, dtype=np.float64)
+        else:
+            items = sorted(data.cells.items(), key=lambda x: x[0])
+            cids = np.fromiter((int(cid) for cid, _ in items), dtype=np.int32, count=len(items))
+            rows = np.asarray([v for _, v in items], dtype=np.float64)
+            centers = np.ascontiguousarray(rows[:, :3], dtype=np.float64)
+            mins = np.ascontiguousarray(rows[:, [3, 5, 7]], dtype=np.float64)
+            maxs = np.ascontiguousarray(rows[:, [4, 6, 8]], dtype=np.float64)
 
         gmin = np.min(mins, axis=0)
         gmax = np.max(maxs, axis=0)
@@ -105,16 +129,37 @@ class MeshRuntime:
         idx = np.floor((centers - gmin) / step).astype(np.int32)
         idx = np.clip(idx, 0, target_dim - 1)
 
-        buckets: Dict[Tuple[int, int, int], List[int]] = {}
-        for cid, ijk in zip(cids.tolist(), idx.tolist()):
-            key = (int(ijk[0]), int(ijk[1]), int(ijk[2]))
-            buckets.setdefault(key, []).append(int(cid))
+        # Build a compact CSR-like bucket index entirely with NumPy.  Cells are
+        # assigned by centroid exactly as before; only the in-memory
+        # representation changes.
+        linear = (
+            (idx[:, 0].astype(np.int64) * target_dim + idx[:, 1].astype(np.int64))
+            * target_dim
+            + idx[:, 2].astype(np.int64)
+        )
+        order = np.argsort(linear, kind="stable")
+        sorted_keys = linear[order]
+        sorted_cids = cids[order]
+        unique_keys, starts = np.unique(sorted_keys, return_index=True)
+        offsets = np.empty(unique_keys.size + 1, dtype=np.int64)
+        offsets[:-1] = starts
+        offsets[-1] = sorted_cids.size
 
         data.spatial_origin = tuple(float(x) for x in gmin)
         data.spatial_step = tuple(float(x) for x in step)
         data.spatial_dims = (target_dim, target_dim, target_dim)
-        data.spatial_buckets = buckets
+        # Keep the legacy field empty rather than materializing millions of
+        # Python integers/lists. geometry_ops transparently prefers compact
+        # arrays and still supports legacy/ad-hoc RuntimeMeshData instances.
+        data.spatial_buckets = {}
+        data.spatial_bucket_keys = np.asarray(unique_keys, dtype=np.int64)
+        data.spatial_bucket_offsets = offsets
+        data.spatial_bucket_cell_ids = np.asarray(sorted_cids, dtype=np.int32)
         data.all_cell_ids = cids
-        data.all_centroids = np.ascontiguousarray(centers, dtype=np.float64)
-        data.all_bbox_min = np.ascontiguousarray(mins, dtype=np.float64)
-        data.all_bbox_max = np.ascontiguousarray(maxs, dtype=np.float64)
+        data.all_centroids = centers
+        data.all_bbox_min = mins
+        data.all_bbox_max = maxs
+        data.all_bbox_center = np.ascontiguousarray(0.5 * (mins + maxs), dtype=np.float64)
+        data.all_bbox_extent = np.ascontiguousarray(0.5 * (maxs - mins), dtype=np.float64)
+        data.global_bbox_min = np.asarray(gmin, dtype=np.float64)
+        data.global_bbox_max = np.asarray(gmax, dtype=np.float64)

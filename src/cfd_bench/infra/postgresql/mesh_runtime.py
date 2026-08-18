@@ -8,6 +8,7 @@ from typing import Dict, Sequence
 import numpy as np
 
 from cfd_bench.core.runtime_mesh import RuntimeMeshData
+from cfd_bench.core.observability import timed_stage
 from cfd_bench.core.types import LiteMesh, LitePolyData
 from cfd_bench.mesh_ops import iotdb_extract_submesh, iotdb_isosurface_extraction
 
@@ -44,29 +45,30 @@ class PGMeshRuntime:
         data = self._shared()
         if data.cells:
             return data
-        cur = self.conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT cell_id, x, y, z FROM cell_centroid
-                WHERE ship_type=%s AND scale=%s AND zone_type=%s
-                ORDER BY cell_id
-                """,
-                (self.ship_type, self.scale, self.zone_type),
-            )
-            for cid, x, y, z in cur.fetchall():
-                xf, yf, zf = float(x), float(y), float(z)
-                pad = 1e-6
-                data.cells[int(cid)] = (
-                    xf, yf, zf,
-                    xf - pad, xf + pad,
-                    yf - pad, yf + pad,
-                    zf - pad, zf + pad,
-                    0,
+        with timed_stage("PostgreSQL mesh", f"load centroids dataset={self.ship_type}_{self.scale} zone={self.zone_type}"):
+            cur = self.conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT cell_id, x, y, z FROM cell_centroid
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    ORDER BY cell_id
+                    """,
+                    (self.ship_type, self.scale, self.zone_type),
                 )
-            data.invalidate_cell_views()
-        finally:
-            cur.close()
+                for cid, x, y, z in cur.fetchall():
+                    xf, yf, zf = float(x), float(y), float(z)
+                    pad = 1e-6
+                    data.cells[int(cid)] = (
+                        xf, yf, zf,
+                        xf - pad, xf + pad,
+                        yf - pad, yf + pad,
+                        zf - pad, zf + pad,
+                        0,
+                    )
+                data.invalidate_cell_views()
+            finally:
+                cur.close()
         return data
 
     def ensure_cell_nodes(self) -> RuntimeMeshData:

@@ -13,24 +13,31 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import aggregation_w2
+from cfd_bench.core.observability import benchmark_progress
 from cfd_bench.workloads.common.random_geom import random_coord_range
 
 
-def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables):
+def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables, *, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
-    while time.time() - t0 < duration:
-        var = random.choice(variables)
-        while True:
-            lo, hi = random_coord_range(bounds)
-            cells = coord_fn(lo, hi)
-            if len(cells) > 0:
-                break
-        result = []
-        for step in steps:
-            result.extend(scalar_fn(cells, var, step))
-        aggregation_w2(np.array(result, dtype=np.float64))
-        txn += 1
+    with benchmark_progress(f"{label} W2", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            var = random.choice(variables)
+            while True:
+                prog.set_phase("coordinate range query")
+                lo, hi = random_coord_range(bounds)
+                cells = coord_fn(lo, hi)
+                if len(cells) > 0:
+                    break
+            chunks = []
+            for step in steps:
+                prog.set_phase(f"scalar query {var} step={step} ({len(cells)} cells)")
+                chunks.append(np.asarray(scalar_fn(cells, var, step), dtype=np.float64).reshape(-1))
+            result = np.concatenate(chunks) if len(chunks) > 1 else (chunks[0] if chunks else np.zeros((0,), dtype=np.float64))
+            prog.set_phase("aggregation")
+            aggregation_w2(result)
+            txn += 1
+            prog.transaction()
     print(f"{label} W2: {txn} txns in {duration}s")
 
 
@@ -48,9 +55,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
             def pg_scalar(cells, var, step):
                 pg.ctx.step = int(step)
                 pg._sync_timestep(int(step))
-                return pg.point_query(cells, var).tolist()
+                return pg.point_query(cells, var)
 
-            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship))
+            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             shared_bounds = bounds
         pg.close()
 
@@ -62,9 +69,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
 
             def iot_scalar(cells, var, step):
                 iotdb.ctx.step = step
-                return iotdb.point_query(cells, var).tolist()
+                return iotdb.point_query(cells, var)
 
-            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship))
+            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         iotdb.close()
 
     if "tiledb" in backends:
@@ -75,9 +82,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
 
             def tdb_scalar(cells, var, step):
                 tiledb.ctx.step = step
-                return tiledb.point_query(cells, var).tolist()
+                return tiledb.point_query(cells, var)
 
-            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship))
+            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         tiledb.close()
 
     if "vtk" in backends:
@@ -88,11 +95,11 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
             def vtk_scalar(cells, var, step):
                 v = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
                 try:
-                    return v.point_query(cells, var).tolist()
+                    return v.point_query(cells, var)
                 finally:
                     v.close()
 
-            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship))
+            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         vtk.close()
 
 

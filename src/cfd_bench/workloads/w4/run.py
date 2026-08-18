@@ -13,25 +13,31 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import cal_next_point
+from cfd_bench.core.observability import benchmark_progress
 from cfd_bench.workloads.common.random_geom import random_start_point
 
 
-def _advect(label, scalar_fn, intersect_fn, bounds, steps, duration, delta_t=0.01):
+def _advect(label, scalar_fn, intersect_fn, bounds, steps, duration, delta_t=0.01, *, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
-    while time.time() - t0 < duration:
-        cid, coord = random_start_point(intersect_fn, bounds)
-        cur_cid, cur_coord = cid, coord
-        for step in steps:
-            u, v, w = scalar_fn(cur_cid, step)
-            vel = np.array([u, v, w], dtype=np.float64)
-            nxt = cal_next_point(cur_coord, vel, delta_t)
-            nxt_cells = intersect_fn(np.array([nxt], dtype=np.float64))
-            if len(nxt_cells) == 0:
-                break
-            cur_cid = int(nxt_cells[0])
-            cur_coord = nxt
-        txn += 1
+    with benchmark_progress(f"{label} W4", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            prog.set_phase("find start point")
+            cid, coord = random_start_point(intersect_fn, bounds)
+            cur_cid, cur_coord = cid, coord
+            for step in steps:
+                prog.set_phase(f"velocity query step={step}")
+                u, v, w = scalar_fn(cur_cid, step)
+                vel = np.array([u, v, w], dtype=np.float64)
+                nxt = cal_next_point(cur_coord, vel, delta_t)
+                prog.set_phase(f"point intersection step={step}")
+                nxt_cells = intersect_fn(np.array([nxt], dtype=np.float64))
+                if len(nxt_cells) == 0:
+                    break
+                cur_cid = int(nxt_cells[0])
+                cur_coord = nxt
+            txn += 1
+            prog.transaction()
     print(f"{label} W4: {txn} txns in {duration}s")
 
 
@@ -52,7 +58,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 vel = pg.velocity_query([cid], step=step)[0]
                 return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _advect("PG", pg_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec)
+            _advect("PG", pg_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             shared_bounds = bounds
         pg.close()
 
@@ -67,7 +73,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 vel = iotdb.velocity_query([cid], step=step)[0]
                 return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _advect("IoTDB", iot_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec)
+            _advect("IoTDB", iot_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         iotdb.close()
 
     if "tiledb" in backends:
@@ -81,7 +87,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 vel = tiledb.velocity_query([cid], step=step)[0]
                 return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _advect("TileDB", tdb_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec)
+            _advect("TileDB", tdb_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         tiledb.close()
 
     if "vtk" in backends:
@@ -100,7 +106,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 finally:
                     v.close()
 
-            _advect("VTK", vtk_scalar, vtk.point_intersection, bounds, steps, cfg.duration_sec)
+            _advect("VTK", vtk_scalar, vtk.point_intersection, bounds, steps, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         vtk.close()
 
 

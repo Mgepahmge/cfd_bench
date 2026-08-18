@@ -10,6 +10,7 @@ from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, random_var_range_db, uses_vtk_geom
+from cfd_bench.core.observability import benchmark_progress
 
 
 def random_var_range_vtk(vtk_mesh, attribute_name: str):
@@ -21,17 +22,21 @@ def random_var_range_vtk(vtk_mesh, attribute_name: str):
     return lo, hi
 
 
-def _bench(label, range_fn, client, geom_client, duration, step, variables):
+def _bench(label, range_fn, client, geom_client, duration, step, variables, *, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
-    while time.time() - t0 < duration:
-        var = random.choice(variables)
-        if geom_client is not None and hasattr(geom_client, "vtk_mesh") and geom_client.vtk_mesh is not None:
-            lo, hi = random_var_range_vtk(geom_client.vtk_mesh, var)
-        else:
-            lo, hi = random_var_range_db(client, var, step=step)
-        range_fn(lo, hi, var)
-        txn += 1
+    with benchmark_progress(f"{label} W8", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            var = random.choice(variables)
+            prog.set_phase(f"sample variable range {var}")
+            if geom_client is not None and hasattr(geom_client, "vtk_mesh") and geom_client.vtk_mesh is not None:
+                lo, hi = random_var_range_vtk(geom_client.vtk_mesh, var)
+            else:
+                lo, hi = random_var_range_db(client, var, step=step)
+            prog.set_phase(f"variable range query {var}")
+            range_fn(lo, hi, var)
+            txn += 1
+            prog.transaction()
     print(f"{label} W8: {txn} txns in {duration}s")
 
 
@@ -47,6 +52,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             cfg.duration_sec,
             step,
             cfg.valid_variables(ship),
+            progress=cfg.progress,
+            progress_interval=cfg.progress_interval_sec,
         )
         pg.close()
 
@@ -61,6 +68,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             cfg.duration_sec,
             step,
             cfg.valid_variables(ship),
+            progress=cfg.progress,
+            progress_interval=cfg.progress_interval_sec,
         )
         iotdb.close()
 
@@ -75,6 +84,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             cfg.duration_sec,
             step,
             cfg.valid_variables(ship),
+            progress=cfg.progress,
+            progress_interval=cfg.progress_interval_sec,
         )
         tiledb.close()
 
@@ -88,6 +99,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             cfg.duration_sec,
             step,
             cfg.valid_variables(ship),
+            progress=cfg.progress,
+            progress_interval=cfg.progress_interval_sec,
         )
         vtk.close()
 

@@ -74,6 +74,56 @@ class TileDBRepository:
         with self.open_array(uri, "r") as A:
             return A[start:end]
 
+
+    def fetch_cells_arrays(self, dataset_key: str, zone: str):
+        """Return compact NumPy cell geometry arrays for runtime hot paths."""
+        uri = self.path_mesh_static(dataset_key, zone, "cells")
+        attrs = ["cx", "cy", "cz", "xmin", "xmax", "ymin", "ymax", "zmin", "zmax", "cell_type"]
+        try:
+            meta = self.fetch_mesh_meta(dataset_key, zone)
+            cell_count = int(meta.get("cell_count", 0))
+        except Exception:
+            cell_count = 0
+
+        if cell_count <= 0:
+            with self.open_array(uri, "r") as A:
+                try:
+                    data = A.query(attrs=attrs)[:]
+                except Exception:
+                    data = A[:]
+            n = len(np.asarray(data["cx"]).reshape(-1))
+            ids = np.arange(n, dtype=np.int32)
+            centers = np.column_stack([data["cx"], data["cy"], data["cz"]]).astype(np.float64, copy=False)
+            mins = np.column_stack([data["xmin"], data["ymin"], data["zmin"]]).astype(np.float64, copy=False)
+            maxs = np.column_stack([data["xmax"], data["ymax"], data["zmax"]]).astype(np.float64, copy=False)
+            types = np.asarray(data["cell_type"], dtype=np.int32).reshape(-1)
+            return ids, centers, mins, maxs, types
+
+        ids = np.arange(cell_count, dtype=np.int32)
+        centers = np.empty((cell_count, 3), dtype=np.float64)
+        mins = np.empty((cell_count, 3), dtype=np.float64)
+        maxs = np.empty((cell_count, 3), dtype=np.float64)
+        types = np.empty(cell_count, dtype=np.int32)
+        chunk = self.config.read_chunk
+        with self.open_array(uri, "r") as A:
+            for start in range(0, cell_count, chunk):
+                end = min(start + chunk, cell_count)
+                try:
+                    data = A.query(attrs=attrs)[start:end]
+                except Exception:
+                    data = A[start:end]
+                centers[start:end, 0] = np.asarray(data["cx"], dtype=np.float64).reshape(-1)
+                centers[start:end, 1] = np.asarray(data["cy"], dtype=np.float64).reshape(-1)
+                centers[start:end, 2] = np.asarray(data["cz"], dtype=np.float64).reshape(-1)
+                mins[start:end, 0] = np.asarray(data["xmin"], dtype=np.float64).reshape(-1)
+                mins[start:end, 1] = np.asarray(data["ymin"], dtype=np.float64).reshape(-1)
+                mins[start:end, 2] = np.asarray(data["zmin"], dtype=np.float64).reshape(-1)
+                maxs[start:end, 0] = np.asarray(data["xmax"], dtype=np.float64).reshape(-1)
+                maxs[start:end, 1] = np.asarray(data["ymax"], dtype=np.float64).reshape(-1)
+                maxs[start:end, 2] = np.asarray(data["zmax"], dtype=np.float64).reshape(-1)
+                types[start:end] = np.asarray(data["cell_type"], dtype=np.int32).reshape(-1)
+        return ids, centers, mins, maxs, types
+
     def fetch_cells(self, dataset_key: str, zone: str) -> Dict[int, Tuple[float, ...]]:
         uri = self.path_mesh_static(dataset_key, zone, "cells")
         out: Dict[int, Tuple[float, ...]] = {}

@@ -21,6 +21,17 @@ def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
         help="Dataset key(s) to benchmark, e.g. JBC_615k beam_static",
     )
     ap.add_argument("--duration", type=float, default=60.0)
+    ap.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show passive benchmark heartbeat/progress diagnostics (off by default to avoid perturbing throughput)",
+    )
+    ap.add_argument(
+        "--progress-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between --progress heartbeat messages (default: 5)",
+    )
     ap.add_argument("--steps", type=int, nargs="+", default=None, help="Override auto-discovered timesteps/frames")
     ap.add_argument("--variables", nargs="+", default=None, help="Override auto-discovered variables")
     ap.add_argument("--zone-fluid", default=None, help="Override auto-discovered fluid/result zone")
@@ -139,6 +150,8 @@ def workload_config_from_args(args, datasets=None, ships=None) -> WorkloadConfig
         max_range_dir=getattr(args, "max_range_dir", resolve_max_range_dir()),
         zone_fluid=explicit_zone,
         zone_hull=getattr(args, "zone_hull", "0_Wall_hull"),
+        progress=bool(getattr(args, "progress", False)),
+        progress_interval_sec=float(getattr(args, "progress_interval", 5.0)),
         discovered_steps=discovered_steps,
         discovered_variables=discovered_variables,
         discovered_zones=discovered_zones,

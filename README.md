@@ -294,10 +294,29 @@ export CFD_BENCH_IOTDB_ROOT_PATH=root.simulation_data
 
 Install HDF5 support with `pip install 'cfd_bench[h5]'`; backend loading additionally requires the corresponding extra: `cfd_bench[postgresql]`, `cfd_bench[iotdb]`, or `cfd_bench[tiledb]`.
 
-## Large-mesh runtime performance (v12)
+## Large-mesh runtime performance and observability (v12-v13)
 
-W1-W8 keep the historical benchmark-duration semantics: `--duration` is still the target time window for each benchmark loop, not a hard per-transaction deadline. v12 improves large-mesh scaling without changing the persisted PostgreSQL, IoTDB, or TileDB schemas, so existing ingests can be reused.
+W1-W8 keep the historical benchmark-duration semantics: `--duration` is still the target time window for each benchmark loop, not a hard per-transaction deadline. v12-v13 improve large-mesh scaling without changing the persisted PostgreSQL, IoTDB, or TileDB schemas, so existing ingests can be reused.
 
-The runtime now treats mesh topology as immutable benchmark state. IoTDB and TileDB share a small process-local static-mesh cache across workload/timestep clients, hot geometry paths operate on contiguous NumPy centroid/AABB arrays rather than rebuilding Python dictionaries, and line/plane/range tests are vectorized. PostgreSQL point location keeps candidate ranking in SQL instead of downloading all centroids; PostgreSQL plane AABBs and W7 static centroid/adjacency state are reused across timesteps.
+The runtime treats mesh topology as immutable benchmark state. IoTDB and TileDB share a small process-local static-mesh cache across workload/timestep clients, hot geometry paths operate on contiguous NumPy centroid/AABB arrays rather than rebuilding Python dictionaries, and coordinate/line/plane tests are vectorized with bounded-memory chunking for very large meshes. PostgreSQL point location keeps candidate ranking in SQL instead of downloading all centroids; PostgreSQL plane AABBs and W7 static centroid/adjacency state are reused across timesteps.
 
-TileDB scalar/velocity point reads now fetch requested rows/ranges instead of `A[:]`, W4/W5 fetch U/V/W in one backend operation, W8 caches per-frame variable ranges, W6 caches static surface normals, and W3 performs topology/node/scalar reads on the selected submesh when possible instead of repeatedly materializing the whole mesh. These are runtime-only changes: no re-ingest is required.
+v13 further replaces the resident IoTDB/TileDB per-cell Python `dict[int, tuple]` representation with a NumPy-backed read-only Mapping facade. The public runtime mapping behavior is retained, but large meshes no longer require one permanent Python tuple per cell in addition to the NumPy geometry arrays. The uniform-grid point locator also uses compact sorted key/offset/cell-id arrays rather than a Python dictionary of bucket lists. Global AABB bounds, centers, and extents are computed once and reused by point/line/plane queries.
+
+TileDB scalar/velocity point reads fetch requested rows/ranges instead of `A[:]`, W4/W5 fetch U/V/W in one backend operation, W8 caches per-frame variable ranges, W6 caches static surface normals and reduces pressure/normal arrays with NumPy matrix operations, W7 solves the three velocity-gradient right-hand sides in one least-squares call, and W3 performs topology/node/scalar reads on the selected submesh when possible instead of repeatedly materializing the whole mesh. These are runtime-only changes: no re-ingest is required.
+
+### Runtime stage/progress diagnostics
+
+Low-frequency `[stage]` messages are printed around setup and benchmark boundaries (backend connection, cold static-mesh loading/indexing, bounds resolution, benchmark-loop start/end, and total workload wall time). These markers are outside transaction hot loops and are intended to show whether a long wall-clock delay is setup, geometry, scalar I/O, or computation.
+
+For finer diagnostics, opt in to the passive progress reporter:
+
+```bash
+cfd-bench run \
+  --backend tiledb \
+  --datasets structure_01 \
+  --workloads w1 w2 w3 w4 w5 w6 w7 w8 \
+  --progress \
+  --progress-interval 5
+```
+
+`--progress` reports elapsed time, completed transactions, and the current operation phase (for example `line intersection`, `scalar query U`, `extract submesh`, or `Q-criterion`). On an interactive terminal it renders a compact progress bar; redirected/non-interactive output uses ordinary heartbeat lines. The reporter is observational only: it does not create a new deadline, cancel a transaction, alter random inputs, or change the workload stop conditions. Leave it disabled for the cleanest throughput measurement.

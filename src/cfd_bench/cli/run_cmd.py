@@ -30,6 +30,7 @@ def run_run(args: argparse.Namespace) -> int:
     backends = set(args.backend)
     print("Runtime configuration:")
     print(f"  backends={sorted(backends)} datasets={cfg.ships}")
+    print(f"  progress={cfg.progress} progress_interval={cfg.progress_interval_sec:g}s")
     for ship in cfg.ships:
         print(
             f"  {ship}: zone={cfg.fluid_zone(ship)} "

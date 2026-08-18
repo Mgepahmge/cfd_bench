@@ -263,22 +263,44 @@ class PGMeshBackend:
                 ids.append(int(cell_id))
                 mins.append(np.min(xyz, axis=0))
                 maxs.append(np.max(xyz, axis=0))
+            mins_arr = np.asarray(mins, dtype=np.float64).reshape(-1, 3)
+            maxs_arr = np.asarray(maxs, dtype=np.float64).reshape(-1, 3)
             self._plane_bbox_cache = (
                 np.asarray(ids, dtype=np.int32),
-                np.asarray(mins, dtype=np.float64).reshape(-1, 3),
-                np.asarray(maxs, dtype=np.float64).reshape(-1, 3),
+                mins_arr,
+                maxs_arr,
+                np.ascontiguousarray(0.5 * (mins_arr + maxs_arr), dtype=np.float64),
+                np.ascontiguousarray(0.5 * (maxs_arr - mins_arr), dtype=np.float64),
             )
             if cache_key is not None:
                 _PLANE_BBOX_CACHE[cache_key] = self._plane_bbox_cache
                 while len(_PLANE_BBOX_CACHE) > _PLANE_BBOX_CACHE_LIMIT:
                     _PLANE_BBOX_CACHE.popitem(last=False)
 
-        ids, mins, maxs = self._plane_bbox_cache
+        cached = self._plane_bbox_cache
+        if len(cached) >= 5:
+            ids, mins, maxs, centers, extents = cached[:5]
+        else:  # compatibility with a cache populated by an older client object
+            ids, mins, maxs = cached
+            centers = np.ascontiguousarray(0.5 * (mins + maxs), dtype=np.float64)
+            extents = np.ascontiguousarray(0.5 * (maxs - mins), dtype=np.float64)
+            self._plane_bbox_cache = (ids, mins, maxs, centers, extents)
         if ids.size == 0:
             return np.zeros((0,), dtype=np.int32)
-        centers = 0.5 * (mins + maxs)
-        extents = 0.5 * (maxs - mins)
-        signed = (centers - p0) @ n
-        radius = extents @ np.abs(n)
-        return ids[np.abs(signed) <= radius + float(eps)].astype(np.int32, copy=False)
+        origin_dot = float(p0 @ n)
+        abs_n = np.abs(n)
+        chunk = 500_000
+        if ids.size <= chunk:
+            signed = centers @ n - origin_dot
+            radius = extents @ abs_n
+            return ids[np.abs(signed) <= radius + float(eps)].astype(np.int32, copy=False)
+        hits = []
+        for start in range(0, ids.size, chunk):
+            end = min(start + chunk, ids.size)
+            signed = centers[start:end] @ n - origin_dot
+            radius = extents[start:end] @ abs_n
+            mask = np.abs(signed) <= radius + float(eps)
+            if np.any(mask):
+                hits.append(ids[start:end][mask])
+        return np.concatenate(hits).astype(np.int32, copy=False) if hits else np.zeros((0,), dtype=np.int32)
 

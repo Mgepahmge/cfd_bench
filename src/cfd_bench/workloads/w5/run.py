@@ -12,6 +12,7 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import cal_next_point
+from cfd_bench.core.observability import benchmark_progress
 from cfd_bench.workloads.common.random_geom import random_start_point
 
 
@@ -30,6 +31,7 @@ def _integrate_one_streamline(
     deadline: float,
     delta_t: float,
     max_steps: int = _MAX_STREAMLINE_STEPS,
+    reporter=None,
 ) -> bool:
     """Integrate one streamline.
 
@@ -43,6 +45,8 @@ def _integrate_one_streamline(
         if time.monotonic() >= deadline:
             return False
 
+        if reporter is not None:
+            reporter.set_phase(f"velocity query cell={cur_cid}")
         u, v, w = scalar_fn(cur_cid)
         vel = np.array([u, v, w], dtype=np.float64)
         if not np.all(np.isfinite(vel)) or float(np.linalg.norm(vel)) <= _MIN_SPEED:
@@ -52,6 +56,8 @@ def _integrate_one_streamline(
         if not np.all(np.isfinite(nxt)) or np.array_equal(nxt, cur_coord):
             return True
 
+        if reporter is not None:
+            reporter.set_phase("point intersection")
         nxt_cells = intersect_fn(np.array([nxt], dtype=np.float64))
         if len(nxt_cells) == 0:
             return True
@@ -64,28 +70,32 @@ def _integrate_one_streamline(
     return True
 
 
-def _streamline(label, scalar_fn, intersect_fn, bounds, duration, delta_t=1.0):
+def _streamline(label, scalar_fn, intersect_fn, bounds, duration, delta_t=1.0, *, progress=False, progress_interval=5.0):
     txn = 0
     start = time.monotonic()
     deadline = start + float(duration)
 
-    while time.monotonic() < deadline:
-        try:
-            cid, coord = random_start_point(intersect_fn, bounds, deadline=deadline)
-        except TimeoutError:
-            break
+    with benchmark_progress(f"{label} W5", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.monotonic() < deadline:
+            try:
+                prog.set_phase("find start point")
+                cid, coord = random_start_point(intersect_fn, bounds, deadline=deadline)
+            except TimeoutError:
+                break
 
-        completed = _integrate_one_streamline(
-            scalar_fn,
-            intersect_fn,
-            cid,
-            coord,
-            deadline=deadline,
-            delta_t=delta_t,
-        )
-        if not completed:
-            break
-        txn += 1
+            completed = _integrate_one_streamline(
+                scalar_fn,
+                intersect_fn,
+                cid,
+                coord,
+                deadline=deadline,
+                delta_t=delta_t,
+                reporter=prog,
+            )
+            if not completed:
+                break
+            txn += 1
+            prog.transaction()
 
     print(f"{label} W5: {txn} txns in {duration}s")
 
@@ -103,7 +113,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 vel = pg.velocity_query([cid])[0]
                 return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _streamline("PG", pg_scalar, geom.point_intersection, bounds, cfg.duration_sec)
+            _streamline("PG", pg_scalar, geom.point_intersection, bounds, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             shared_bounds = bounds
         pg.close()
 
@@ -117,7 +127,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 vel = iotdb.velocity_query([cid])[0]
                 return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _streamline("IoTDB", iot_scalar, geom.point_intersection, bounds, cfg.duration_sec)
+            _streamline("IoTDB", iot_scalar, geom.point_intersection, bounds, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         iotdb.close()
 
     if "tiledb" in backends:
@@ -130,7 +140,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 vel = tiledb.velocity_query([cid])[0]
                 return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _streamline("TileDB", tdb_scalar, geom.point_intersection, bounds, cfg.duration_sec)
+            _streamline("TileDB", tdb_scalar, geom.point_intersection, bounds, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         tiledb.close()
 
     if "vtk" in backends:
@@ -145,7 +155,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                     float(vtk.point_query([cid], "W")[0]),
                 )
 
-            _streamline("VTK", vtk_scalar, vtk.point_intersection, bounds, cfg.duration_sec)
+            _streamline("VTK", vtk_scalar, vtk.point_intersection, bounds, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         vtk.close()
 
 

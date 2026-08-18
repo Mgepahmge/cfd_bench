@@ -206,6 +206,72 @@ class IoTDBRepository:
         return out
 
     # -------------------- mesh static --------------------
+
+    def fetch_cells_arrays(self, dataset_key: str, zone: str):
+        """Return compact NumPy cell geometry arrays for runtime hot paths."""
+        path = self.path_mesh_static(dataset_key, zone, "cells")
+        cell_count = None
+        try:
+            meta_path = self.path_mesh_static(dataset_key, zone, "mesh_meta")
+            rows = self.query_rows(f"SELECT cell_count FROM {meta_path} LIMIT 1;")
+            if rows and rows[0][1]:
+                cell_count = _to_int(rows[0][1][0], -1)
+        except Exception:
+            cell_count = None
+
+        fields = "cx,cy,cz,xmin,xmax,ymin,ymax,zmin,zmax,cell_type"
+        parts_ids = []
+        parts_centers = []
+        parts_mins = []
+        parts_maxs = []
+        parts_types = []
+
+        def consume(rows):
+            good = [(cid, vals) for cid, vals in rows if len(vals) >= 10]
+            if not good:
+                return
+            parts_ids.append(np.fromiter((int(cid) for cid, _ in good), dtype=np.int64, count=len(good)))
+            parts_centers.append(np.asarray([
+                [_to_float(v[0]), _to_float(v[1]), _to_float(v[2])] for _, v in good
+            ], dtype=np.float64))
+            parts_mins.append(np.asarray([
+                [_to_float(v[3]), _to_float(v[5]), _to_float(v[7])] for _, v in good
+            ], dtype=np.float64))
+            parts_maxs.append(np.asarray([
+                [_to_float(v[4]), _to_float(v[6]), _to_float(v[8])] for _, v in good
+            ], dtype=np.float64))
+            parts_types.append(np.fromiter((_to_int(v[9], 0) for _, v in good), dtype=np.int32, count=len(good)))
+
+        if cell_count is None or cell_count <= 0:
+            consume(self.query_rows(f"SELECT {fields} FROM {path};"))
+        else:
+            chunk = 50000
+            for start in range(0, cell_count, chunk):
+                end = start + chunk
+                consume(self.query_rows(
+                    f"SELECT {fields} FROM {path} WHERE Time >= {start} AND Time < {end};"
+                ))
+
+        if not parts_ids:
+            return (
+                np.zeros((0,), dtype=np.int32), np.zeros((0, 3), dtype=np.float64),
+                np.zeros((0, 3), dtype=np.float64), np.zeros((0, 3), dtype=np.float64),
+                np.zeros((0,), dtype=np.int32),
+            )
+        ids = np.concatenate(parts_ids)
+        centers = np.concatenate(parts_centers, axis=0)
+        mins = np.concatenate(parts_mins, axis=0)
+        maxs = np.concatenate(parts_maxs, axis=0)
+        types = np.concatenate(parts_types)
+        order = np.argsort(ids, kind="stable")
+        return (
+            ids[order].astype(np.int32, copy=False),
+            np.ascontiguousarray(centers[order], dtype=np.float64),
+            np.ascontiguousarray(mins[order], dtype=np.float64),
+            np.ascontiguousarray(maxs[order], dtype=np.float64),
+            types[order].astype(np.int32, copy=False),
+        )
+
     def fetch_cells(self, dataset_key: str, zone: str) -> Dict[int, Tuple[float, ...]]:
         path = self.path_mesh_static(dataset_key, zone, "cells")
         out: Dict[int, Tuple[float, ...]] = {}

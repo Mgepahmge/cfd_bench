@@ -12,6 +12,7 @@ from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import cell_count, make_geom_client
+from cfd_bench.core.observability import benchmark_progress
 
 
 def read_max_diffs(path: str) -> dict:
@@ -39,22 +40,28 @@ def _find_max_diff_file(directory: str, ship: str, step: int):
     return None
 
 
-def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, duration, variables):
+def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, duration, variables, *, progress=False, progress_interval=5.0):
     usable = [str(v).upper() for v in variables if str(v).upper() in max_diffs]
     if not usable:
         print(f"{label} W3: skip (no variables with max-diff metadata)")
         return
     txn = 0
     t0 = time.time()
-    while time.time() - t0 < duration:
-        var = random.choice(usable)
-        delta = max_diffs[var]
-        cid = random.randint(0, max(0, n_cells - 1))
-        iso_val = float(scalar_fn([cid], var)[0])
-        cells = range_fn(iso_val - delta, iso_val + delta, var)
-        sub = extract_fn(cells)
-        iso_fn(sub, var, iso_val)
-        txn += 1
+    with benchmark_progress(f"{label} W3", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            var = random.choice(usable)
+            delta = max_diffs[var]
+            cid = random.randint(0, max(0, n_cells - 1))
+            prog.set_phase(f"seed scalar query {var}")
+            iso_val = float(scalar_fn([cid], var)[0])
+            prog.set_phase(f"variable range query {var}")
+            cells = range_fn(iso_val - delta, iso_val + delta, var)
+            prog.set_phase(f"extract submesh ({len(cells)} cells)")
+            sub = extract_fn(cells)
+            prog.set_phase("isosurface extraction")
+            iso_fn(sub, var, iso_val)
+            txn += 1
+            prog.transaction()
     print(f"{label} W3: {txn} txns in {duration}s")
 
 
@@ -79,6 +86,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 max_diffs,
                 cfg.duration_sec,
                 variables,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
             )
         finally:
             pg.close()
@@ -107,6 +116,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 max_diffs_iot,
                 cfg.duration_sec,
                 variables,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
             )
         finally:
             iotdb.close()
@@ -133,6 +144,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 max_diffs_tiledb,
                 cfg.duration_sec,
                 variables,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
             )
         finally:
             tiledb.close()
@@ -158,6 +171,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             max_diffs,
             cfg.duration_sec,
             variables,
+            progress=cfg.progress,
+            progress_interval=cfg.progress_interval_sec,
         )
         vtk.close()
 

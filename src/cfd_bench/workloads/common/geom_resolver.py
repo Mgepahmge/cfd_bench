@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 
 from cfd_bench.workloads.common.backends import make_vtk, mesh_bounds_from_client
 from cfd_bench.workloads.common.config import WorkloadConfig
+from cfd_bench.core.observability import timed_stage
 
 
 def uses_vtk_geom(cfg: WorkloadConfig) -> bool:
@@ -33,14 +34,16 @@ def mesh_bounds(
     geom_client: Any,
     zone: str = "0_Fluid",
 ) -> Optional[List[float]]:
-    if uses_vtk_geom(cfg):
-        return mesh_bounds_from_client(geom_client)
-    bounds = mesh_bounds_from_client(data_client)
-    if bounds is not None:
-        return bounds
-    if geom_client is not data_client:
-        return mesh_bounds_from_client(geom_client)
-    return None
+    label = type(data_client).__name__
+    with timed_stage(label, f"resolve mesh bounds dataset={ship} step={step} zone={zone}"):
+        if uses_vtk_geom(cfg):
+            return mesh_bounds_from_client(geom_client)
+        bounds = mesh_bounds_from_client(data_client)
+        if bounds is not None:
+            return bounds
+        if geom_client is not data_client:
+            return mesh_bounds_from_client(geom_client)
+        return None
 
 
 def cell_count(geom_client):

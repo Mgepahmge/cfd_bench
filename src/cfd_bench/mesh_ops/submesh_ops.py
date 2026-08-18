@@ -10,7 +10,16 @@ from cfd_bench.mesh_ops.geometry_ops import bboxes_for_cell_ids
 
 
 def iotdb_extract_submesh(data: RuntimeMeshData, cell_indexes: Sequence[int]) -> LiteMesh:
-    picked = [int(c) for c in cell_indexes if int(c) in data.cells]
+    requested = np.asarray([int(c) for c in cell_indexes if int(c) >= 0], dtype=np.int64)
+    if requested.size and data.all_cell_ids.size:
+        ids = np.asarray(data.all_cell_ids, dtype=np.int64)
+        pos = np.searchsorted(ids, requested)
+        valid = (pos >= 0) & (pos < ids.size)
+        clipped = np.clip(pos, 0, max(ids.size - 1, 0))
+        valid &= ids[clipped] == requested
+        picked = requested[valid].astype(np.int64, copy=False).tolist()
+    else:
+        picked = [int(c) for c in requested.tolist() if int(c) in data.cells]
     picked_set = set(picked)
 
     node_ids = set()

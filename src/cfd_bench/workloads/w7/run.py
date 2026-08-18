@@ -11,46 +11,56 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.random_geom import random_coord_range
+from cfd_bench.core.observability import benchmark_progress
 
 
-def _bench_db(label, coord_fn, qc_fn, bounds, duration):
+def _bench_db(label, coord_fn, qc_fn, bounds, duration, *, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
-    while time.time() - t0 < duration:
-        while True:
-            lo, hi = random_coord_range(bounds)
-            cells = coord_fn(lo, hi)
-            if len(cells) > 0:
-                break
-        qc_fn(lo, hi)
-        txn += 1
+    with benchmark_progress(f"{label} W7", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            while True:
+                prog.set_phase("coordinate range query")
+                lo, hi = random_coord_range(bounds)
+                cells = coord_fn(lo, hi)
+                if len(cells) > 0:
+                    break
+            prog.set_phase(f"Q-criterion ({len(cells)} ROI cells)")
+            qc_fn(lo, hi)
+            txn += 1
+            prog.transaction()
     print(f"{label} W7: {txn} txns in {duration}s")
 
 
-def _bench_vtk(label, geom, bounds, duration):
+def _bench_vtk(label, geom, bounds, duration, *, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
-    while time.time() - t0 < duration:
-        while True:
-            lo, hi = random_coord_range(bounds)
-            cells = geom.range_query_coord(lo, hi)
-            if len(cells) > 0:
-                break
-        sub = geom.extract_submesh(cells)
-        if sub is not None:
-            try:
-                from vtk import vtkDataObject, vtkGradientFilter
+    with benchmark_progress(f"{label} W7", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            while True:
+                prog.set_phase("coordinate range query")
+                lo, hi = random_coord_range(bounds)
+                cells = geom.range_query_coord(lo, hi)
+                if len(cells) > 0:
+                    break
+            prog.set_phase(f"extract submesh ({len(cells)} cells)")
+            sub = geom.extract_submesh(cells)
+            if sub is not None:
+                try:
+                    from vtk import vtkDataObject, vtkGradientFilter
 
-                vel = sub.GetPointData().GetArray("Velocity")
-                if vel:
-                    gf = vtkGradientFilter()
-                    gf.SetInputData(sub)
-                    gf.SetInputArrayToProcess(0, 0, 0, vtkDataObject.FIELD_ASSOCIATION_POINTS, "Velocity")
-                    gf.SetComputeQCriterion(True)
-                    gf.Update()
-            except Exception:
-                pass
-        txn += 1
+                    prog.set_phase("VTK gradient/Q filter")
+                    vel = sub.GetPointData().GetArray("Velocity")
+                    if vel:
+                        gf = vtkGradientFilter()
+                        gf.SetInputData(sub)
+                        gf.SetInputArrayToProcess(0, 0, 0, vtkDataObject.FIELD_ASSOCIATION_POINTS, "Velocity")
+                        gf.SetComputeQCriterion(True)
+                        gf.Update()
+                except Exception:
+                    pass
+            txn += 1
+            prog.transaction()
     print(f"{label} W7: {txn} txns in {duration}s")
 
 
@@ -68,6 +78,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 lambda lo, hi: pg.compute_qcriterion_roi(lo, hi),
                 bounds,
                 cfg.duration_sec,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
             )
             shared_bounds = bounds
         pg.close()
@@ -83,6 +95,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 lambda lo, hi: iotdb.compute_qcriterion_roi(lo, hi),
                 bounds,
                 cfg.duration_sec,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
             )
         iotdb.close()
 
@@ -97,6 +111,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 lambda lo, hi: tiledb.compute_qcriterion_roi(lo, hi),
                 bounds,
                 cfg.duration_sec,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
             )
         tiledb.close()
 
@@ -104,7 +120,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
         bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.fluid_zone(ship)) or shared_bounds
         if bounds:
-            _bench_vtk("VTK", vtk, bounds, cfg.duration_sec)
+            _bench_vtk("VTK", vtk, bounds, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         vtk.close()
 
 

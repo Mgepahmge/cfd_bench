@@ -33,6 +33,8 @@ class WorkloadConfig:
     geom_engine: str = "db"
     zone_fluid: Optional[str] = None
     zone_hull: str = "0_Wall_hull"
+    progress: bool = False
+    progress_interval_sec: float = 5.0
     discovered_steps: Dict[str, List[int]] = field(default_factory=dict)
     discovered_variables: Dict[str, List[str]] = field(default_factory=dict)
     discovered_zones: Dict[str, str] = field(default_factory=dict)
