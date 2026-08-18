@@ -49,6 +49,23 @@ def _bench_iotdb_native(client, scalar_name: str, duration: float):
     print(f"IoTDB W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})")
 
 
+def _bench_tiledb_native(client, scalar_name: str, duration: float):
+    """TileDB-native W6 using explicit surface cell ids."""
+    txn = 0
+    t0 = time.time()
+    while time.time() - t0 < duration:
+        cells, normals = client.surface_cells_and_normals()
+        if len(cells) == 0 or len(normals) == 0:
+            break
+        values = client.point_query(cells, scalar_name)
+        n = min(len(normals), len(values))
+        if n == 0:
+            break
+        calculate_force(normals[:n], values[:n])
+        txn += 1
+    print(f"TileDB W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})")
+
+
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
     if "postgresql" in backends:
         pg = make_pg(ship, step, zone=cfg.zone_hull)
@@ -106,57 +123,64 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 iotdb.close()
 
     if "tiledb" in backends:
-        # create temporary client
-        tiledb = make_tiledb(
-            ship,
-            step,
-            cfg.tiledb_root,
-            zone=cfg.fluid_zone(ship),
+        # Use the same generic W6 strategy for CFD and H5 data: prefer a real
+        # hull/wall zone and pressure, but fall back to any usable mesh zone
+        # and cell scalar rather than failing when only 0_Fluid exists.
+        probe = make_tiledb(
+            ship, step, cfg.tiledb_root, zone=cfg.fluid_zone(ship)
         )
+        try:
+            zones = probe.w6_zone_candidates(
+                ship, preferred_zone=cfg.fluid_zone(ship), hull_hint=cfg.zone_hull
+            )
+        finally:
+            probe.close()
 
-        # automatically detect hull zone
-        hull_zone = tiledb.resolve_hull_zone(
-            ship
-        )
+        selected = None
+        last_error = None
+        candidates = ["P"] + list(cfg.valid_variables(ship))
+        for zone in zones:
+            client = make_tiledb(ship, step, cfg.tiledb_root, zone=zone)
+            try:
+                cells, normals = client.surface_cells_and_normals()
+                if len(cells) == 0 or len(normals) == 0:
+                    raise RuntimeError(f"no usable mesh cells in zone={zone}")
+                scalar_name = client.resolve_w6_scalar(candidates)
+                selected = (client, scalar_name)
+                break
+            except Exception as exc:
+                last_error = exc
+                client.close()
 
-        # reconnect using hull zone
-        tiledb.close()
+        if selected is None:
+            raise RuntimeError(
+                f"TileDB W6 could not find a usable zone/scalar for dataset={ship} "
+                f"step={step}: {last_error}"
+            )
 
-        tiledb = make_tiledb(
-            ship,
-            step,
-            cfg.tiledb_root,
-            zone=hull_zone,
-        )
-
-        geom = make_geom_client(
-            cfg,
-            ship,
-            step,
-            tiledb,
-            hull_zone,
-        )
-
-        n_cells = cell_count(
-            geom
-        )
-
-        sub = geom.extract_submesh(
-            list(range(n_cells))
-        )
-
-        _bench(
-            "TileDB",
-            lambda: geom.surface_norm(sub),
-            lambda c: tiledb.point_query(
-                c,
-                "P"
-            ),
-            n_cells,
-            cfg.duration_sec,
-        )
-
-        tiledb.close()
+        tiledb, scalar_name = selected
+        try:
+            if uses_vtk_geom(cfg):
+                # Preserve the historical optional VTK-geometry mode while
+                # using the same robust TileDB zone/scalar selection.
+                geom = make_geom_client(cfg, ship, step, tiledb, tiledb.ctx.zone)
+                try:
+                    n_cells = cell_count(geom)
+                    sub = geom.extract_submesh(list(range(n_cells)))
+                    _bench(
+                        "TileDB",
+                        lambda: geom.surface_norm(sub),
+                        lambda c: tiledb.point_query(c, scalar_name),
+                        n_cells,
+                        cfg.duration_sec,
+                    )
+                finally:
+                    if geom is not tiledb:
+                        geom.close()
+            else:
+                _bench_tiledb_native(tiledb, scalar_name, cfg.duration_sec)
+        finally:
+            tiledb.close()
 
     if "vtk" in backends:
         hull = make_vtk(cfg.vtk_hull_dir, ship, step, zone=cfg.zone_hull)

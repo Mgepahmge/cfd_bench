@@ -144,14 +144,116 @@ class TileDBMeshClient(AbstractContextManager):
         return tiledb_isosurface_extraction(data, scalar_map, float(iso_value))
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
-        ctx = self._require_ctx()
+        # W6 database-geometry path. Prefer persisted CFD boundary faces and
+        # fall back to topology-derived normals when a dataset has only a main
+        # mesh zone (common for H5 structural data).
+        if mesh_handle is None:
+            _, normals = self.surface_cells_and_normals()
+            return normals
         if isinstance(mesh_handle, LitePolyData):
             return tiledb_surface_norm(mesh_handle)
         if isinstance(mesh_handle, LiteMesh):
             return tiledb_surface_norm_from_mesh(mesh_handle)
+        raise TypeError("TileDB surface_norm requires LiteMesh or LitePolyData")
+
+    @staticmethod
+    def _normal_from_points(points: Sequence[Sequence[float]]) -> np.ndarray:
+        """Return a deterministic unit normal for 1D/2D/3D element points.
+
+        W6 prioritizes being executable across CFD and structural meshes. True
+        surface elements use a geometric cross product; line elements use a
+        reproducible perpendicular vector.
+        """
+        pts = [np.asarray(p, dtype=np.float64) for p in points]
+        if len(pts) >= 3:
+            p0 = pts[0]
+            for i in range(1, len(pts) - 1):
+                for j in range(i + 1, len(pts)):
+                    n = np.cross(pts[i] - p0, pts[j] - p0)
+                    length = float(np.linalg.norm(n))
+                    if length > 1e-15:
+                        return n / length
+        if len(pts) >= 2:
+            tangent = pts[1] - pts[0]
+            length = float(np.linalg.norm(tangent))
+            if length > 1e-15:
+                tangent = tangent / length
+                axes = np.eye(3, dtype=np.float64)
+                axis = axes[int(np.argmin(np.abs(axes @ tangent)))]
+                n = np.cross(tangent, axis)
+                nlen = float(np.linalg.norm(n))
+                if nlen > 1e-15:
+                    return n / nlen
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+
+    def surface_cells_and_normals(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return cell ids aligned with normals for TileDB-native W6.
+
+        Legacy CFD datasets may persist explicit boundary faces. H5 datasets
+        often have only mesh topology, so they use a generic per-cell geometry
+        fallback. Explicit cell ids avoid assuming boundary owners are 0..N-1.
+        """
+        ctx = self._require_ctx()
+        boundary = self.repo.fetch_boundary_faces(ctx.dataset_key, ctx.zone)
+        if boundary:
+            cell_norms = {}
+            for cid, nx, ny, nz, area in boundary:
+                area_f = max(abs(float(area)), 1e-15)
+                acc = cell_norms.setdefault(int(cid), np.zeros(4, dtype=np.float64))
+                acc[:3] += np.array([nx, ny, nz], dtype=np.float64) * area_f
+                acc[3] += area_f
+            cell_ids = np.asarray(sorted(cell_norms), dtype=np.int32)
+            normals = []
+            for cid in cell_ids:
+                acc = cell_norms[int(cid)]
+                n = acc[:3] / max(float(acc[3]), 1e-15)
+                length = float(np.linalg.norm(n))
+                normals.append(n / length if length > 1e-15 else np.array([1.0, 0.0, 0.0]))
+            return cell_ids, np.asarray(normals, dtype=np.float64)
+
+        data = self.runtime.ensure_cells(ctx.dataset_key, ctx.zone)
         data = self.runtime.ensure_cell_nodes(ctx.dataset_key, ctx.zone)
-        lite = tiledb_extract_submesh(data, list(data.cells.keys()))
-        return tiledb_surface_norm_from_mesh(lite)
+        cell_ids = np.asarray(
+            sorted(set(data.cells.keys()) | set(data.cell_nodes.keys())),
+            dtype=np.int32,
+        )
+        normals = []
+        for cid in cell_ids:
+            node_ids = data.cell_nodes.get(int(cid), [])
+            points = [data.nodes[nid] for nid in node_ids if nid in data.nodes]
+            normals.append(self._normal_from_points(points))
+        if not normals:
+            return cell_ids, np.zeros((0, 3), dtype=np.float64)
+        return cell_ids, np.asarray(normals, dtype=np.float64)
+
+    def resolve_w6_scalar(
+        self, candidates: Sequence[str] = ("P", "U", "V", "W", "K", "E")
+    ) -> str:
+        """Choose an available cell scalar for W6, preferring pressure.
+
+        CFD data normally resolves to P. Structural H5 data may only expose
+        displacement components; in that case W6 still executes using the
+        first available cell scalar.
+        """
+        ctx = self._require_ctx()
+        ordered = []
+        for name in candidates:
+            var = str(name).strip().upper()
+            if var and var not in ordered:
+                ordered.append(var)
+        available_list = self.repo.list_cell_variables(ctx.dataset_key, ctx.step, ctx.zone)
+        for name in available_list:
+            var = str(name).strip().upper()
+            if var and var not in ordered:
+                ordered.append(var)
+        available = {str(name).upper() for name in available_list}
+        for var in ordered:
+            if var in available:
+                return var
+        raise RuntimeError(
+            f"No usable TileDB cell scalar for W6: dataset={ctx.dataset_key} "
+            f"step={ctx.step} zone={ctx.zone} candidates={ordered}"
+        )
 
     def compute_qcriterion_roi(
         self,
@@ -235,51 +337,41 @@ class TileDBMeshClient(AbstractContextManager):
             ctx.dataset_key, ctx.zone, point_ids, str(attribute_name).upper()
         )
 
-    def resolve_hull_zone(self, dataset_key: str):
-        """
-        Automatically find hull-like mesh zone.
+    def w6_zone_candidates(
+        self, dataset_key: str, preferred_zone: Optional[str] = None, hull_hint: Optional[str] = None
+    ) -> List[str]:
+        """Return all mesh zones in W6 preference order.
 
-        Priority:
-            1. name contains hull
-            2. name contains wall
-            3. name contains symmetry
-            4. any non-fluid zone
+        True hull/wall zones are preferred for CFD. If none exist, the main
+        mesh (including a sole 0_Fluid zone) is still a valid execution
+        fallback for H5 or incomplete legacy datasets.
         """
-
         zones = self.repo.list_mesh_static_zones(dataset_key)
-
         if not zones:
-            raise FileNotFoundError(
-                f"No mesh_static zones found for {dataset_key}"
-            )
+            raise FileNotFoundError(f"No mesh_static zones found for {dataset_key}")
 
-        # 1. explicit hull
-        for z in zones:
-            zl = z.lower()
+        ordered: List[str] = []
+        def add(zone):
+            if zone and zone in zones and zone not in ordered:
+                ordered.append(zone)
 
-            if "hull" in zl:
-                return z
+        add(hull_hint)
+        for keyword in ("hull", "wall", "symmetry"):
+            for zone in zones:
+                if keyword in zone.lower():
+                    add(zone)
+        for zone in zones:
+            if "fluid" not in zone.lower():
+                add(zone)
+        add(preferred_zone)
+        for zone in zones:
+            add(zone)
+        return ordered
 
-        # 2. wall
-        for z in zones:
-            zl = z.lower()
+    def resolve_hull_zone(self, dataset_key: str):
+        """Backward-compatible best W6 zone resolver.
 
-            if "wall" in zl:
-                return z
-
-        # 3. symmetry
-        for z in zones:
-            zl = z.lower()
-
-            if "symmetry" in zl:
-                return z
-
-        # fallback:
-        # choose non-fluid
-        for z in zones:
-            if "fluid" not in z.lower():
-                return z
-
-        raise RuntimeError(
-            f"Cannot identify hull zone from {zones}"
-        )
+        Historically this raised when only 0_Fluid existed. It now returns the
+        best available zone so both CFD and structural datasets remain usable.
+        """
+        return self.w6_zone_candidates(dataset_key)[0]

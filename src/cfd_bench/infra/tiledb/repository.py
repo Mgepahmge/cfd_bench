@@ -386,6 +386,14 @@ class TileDBRepository:
         except Exception:
             return False
 
+    def list_cell_variables(
+        self, dataset_key: str, step: int, zone: str = "0_Fluid"
+    ) -> List[str]:
+        """List attributes stored in the cell-variable array for a frame/zone."""
+        uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
+        with self.open_array(uri, "r") as A:
+            return sorted(str(name).upper() for name in self._array_attr_names(A))
+
     def fetch_var_value_range(
         self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"
     ) -> Tuple[float, float]:
