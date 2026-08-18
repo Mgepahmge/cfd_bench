@@ -115,6 +115,46 @@ def _bucket_candidates(conn, ship_type: str, scale: str, zone_type: str, point_x
         cur.close()
 
 
+
+
+def _bucket_nearest_cell(
+    conn, ship_type: str, scale: str, zone_type: str, point_xyz: Sequence[float]
+) -> Optional[int]:
+    """Return the nearest centroid among the point-locator bucket candidates.
+
+    This keeps PostgreSQL point location database-native.  The historical
+    client downloaded the complete ``cell_centroid`` table once per client
+    merely to rank a handful of bucket candidates in Python, which is
+    prohibitively expensive on multi-million-cell meshes.
+    """
+    x, y, z = float(point_xyz[0]), float(point_xyz[1]), float(point_xyz[2])
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT cc.cell_id
+            FROM point_locator_grid pg
+            CROSS JOIN LATERAL unnest(pg.cell_ids) AS u(cell_id)
+            JOIN cell_centroid cc
+              ON cc.ship_type=pg.ship_type AND cc.scale=pg.scale
+             AND cc.zone_type=pg.zone_type AND cc.cell_id=u.cell_id
+            WHERE pg.ship_type=%s AND pg.scale=%s AND pg.zone_type=%s
+              AND %s BETWEEN pg.x_min AND pg.x_max
+              AND %s BETWEEN pg.y_min AND pg.y_max
+              AND %s BETWEEN pg.z_min AND pg.z_max
+            ORDER BY
+              (cc.x-%s)*(cc.x-%s) +
+              (cc.y-%s)*(cc.y-%s) +
+              (cc.z-%s)*(cc.z-%s)
+            LIMIT 1
+            """,
+            (ship_type, scale, zone_type, x, y, z, x, x, y, y, z, z),
+        )
+        row = cur.fetchone()
+        return None if not row else int(row[0])
+    finally:
+        cur.close()
+
 def _fetch_centroids_map(conn, ship_type: str, scale: str, zone_type: str) -> Dict[int, Tuple[float, float, float]]:
     cur = conn.cursor()
     try:
@@ -141,10 +181,16 @@ def point_intersection(
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if pts.size == 0:
         return np.array([], dtype=np.int32)
-    if centroids is None:
-        centroids = _fetch_centroids_map(conn, ship_type, scale, zone_type)
     out: List[int] = []
     for pt in pts:
+        if centroids is None:
+            cid = _bucket_nearest_cell(conn, ship_type, scale, zone_type, pt)
+            if cid is not None:
+                out.append(int(cid))
+            continue
+        # Compatibility path used by tests and callers that already own a
+        # centroid map.  Normal PostgreSQL clients use the DB-native query
+        # above and no longer materialize every centroid in Python.
         candidates = _bucket_candidates(conn, ship_type, scale, zone_type, pt)
         if candidates:
             cid = min(candidates, key=lambda c: _dist2(pt, centroids.get(c, (1e18, 1e18, 1e18))))
@@ -196,9 +242,13 @@ def compute_qcriterion_roi(
     lower_bound: Sequence[float],
     upper_bound: Sequence[float],
     tau: float = 0.0,
+    *,
+    centroids=None,
+    neighbors=None,
 ) -> Tuple[NDArray[np.int32], NDArray[np.float64]]:
     from cfd_bench.infra.postgresql.qc_ops import qcriterion_roi
 
     return qcriterion_roi(
-        conn, ship_type, scale, zone_type, int(timestep), lower_bound, upper_bound, float(tau)
+        conn, ship_type, scale, zone_type, int(timestep), lower_bound, upper_bound, float(tau),
+        centroids=centroids, neighbors=neighbors,
     )

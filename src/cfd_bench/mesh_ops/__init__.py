@@ -1,4 +1,6 @@
 from cfd_bench.mesh_ops.geometry_ops import (
+    bboxes_for_cell_ids,
+    cells_in_coordinate_range,
     iotdb_line_intersection,
     iotdb_plane_intersection,
     iotdb_point_intersection,
@@ -18,6 +20,8 @@ tiledb_surface_norm = iotdb_surface_norm
 tiledb_surface_norm_from_mesh = iotdb_surface_norm_from_mesh
 
 __all__ = [
+    "bboxes_for_cell_ids",
+    "cells_in_coordinate_range",
     "iotdb_point_intersection",
     "iotdb_line_intersection",
     "iotdb_plane_intersection",

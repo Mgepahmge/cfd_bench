@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import psycopg2
 from numpy.typing import NDArray
+
+
+# Plane/AABB geometry is static across timesteps.  Keep a small process-local
+# cache so W1 does not rebuild the same multi-million-cell bounds for every
+# step.  It is deliberately tiny to cap memory use on large CFD cases.
+_PLANE_BBOX_CACHE = OrderedDict()
+_PLANE_BBOX_CACHE_LIMIT = 2
+
+
+def _plane_cache_key(conn, ship_type: str, scale: str, zone_type: str):
+    dsn = getattr(conn, "dsn", None)
+    if not dsn:
+        return None
+    return (str(dsn), str(ship_type), str(scale), str(zone_type))
 
 
 class PGMeshBackend:
@@ -34,6 +49,7 @@ class PGMeshBackend:
         self.scale = scale
         self.zone_type = zone_type
         self.timestep = int(timestep)
+        self._plane_bbox_cache = None
         self.conn = psycopg2.connect(
             database=db_name,
             user=db_user,
@@ -186,55 +202,83 @@ class PGMeshBackend:
         plane_norm: Sequence[float],
         eps: float = 1e-9,
     ):
-        p0 = np.array(plane_origin, dtype=np.float64)
-        n = np.array(plane_norm, dtype=np.float64)
-        n_norm = np.linalg.norm(n)
+        """Vectorized plane/AABB intersection with one-time topology loading.
+
+        Older code re-read every node and every ``cell_nodes`` row for every
+        W1 plane transaction.  The static cell AABBs are now assembled once
+        per client and all subsequent plane tests run in NumPy.  This matches
+        the bounding-box geometry used by the IoTDB/TileDB DB engines.
+        """
+        p0 = np.asarray(plane_origin, dtype=np.float64).reshape(3)
+        n = np.asarray(plane_norm, dtype=np.float64).reshape(3)
+        n_norm = float(np.linalg.norm(n))
         if n_norm < 1e-15:
             raise ValueError("plane_norm too small")
         n = n / n_norm
-        d = -float(np.dot(n, p0))
 
-        cur = self.conn.cursor()
-        try:
-            # Load nodes once for current zone.
-            cur.execute(
-                """
-                SELECT node_id, x, y, z
-                FROM node_coordinates
-                WHERE ship_type=%s AND scale=%s AND zone_type=%s
-                """,
-                (self.ship_type, self.scale, self.zone_type),
-            )
-            node_xyz = {int(nid): (float(x), float(y), float(z)) for nid, x, y, z in cur.fetchall()}
+        if self._plane_bbox_cache is None:
+            cache_key = _plane_cache_key(self.conn, self.ship_type, self.scale, self.zone_type)
+            if cache_key is not None and cache_key in _PLANE_BBOX_CACHE:
+                self._plane_bbox_cache = _PLANE_BBOX_CACHE.pop(cache_key)
+                _PLANE_BBOX_CACHE[cache_key] = self._plane_bbox_cache
 
-            cur.execute(
-                """
-                SELECT cell_id, node_ids
-                FROM cell_nodes
-                WHERE ship_type=%s AND scale=%s AND zone_type=%s
-                """,
-                (self.ship_type, self.scale, self.zone_type),
-            )
-            rows = cur.fetchall()
-        finally:
-            cur.close()
+        if self._plane_bbox_cache is None:
+            cache_key = _plane_cache_key(self.conn, self.ship_type, self.scale, self.zone_type)
+            cur = self.conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT node_id, x, y, z
+                    FROM node_coordinates
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    """,
+                    (self.ship_type, self.scale, self.zone_type),
+                )
+                node_xyz = {
+                    int(nid): np.array((float(x), float(y), float(z)), dtype=np.float64)
+                    for nid, x, y, z in cur.fetchall()
+                }
+                cur.execute(
+                    """
+                    SELECT cell_id, node_ids
+                    FROM cell_nodes
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    ORDER BY cell_id
+                    """,
+                    (self.ship_type, self.scale, self.zone_type),
+                )
+                rows = cur.fetchall()
+            finally:
+                cur.close()
 
-        out = []
-        for cell_id, node_ids in rows:
-            nids = list(node_ids or [])
-            if not nids:
-                continue
-            s_min, s_max = None, None
-            for nid in nids:
-                xyz = node_xyz.get(int(nid))
-                if xyz is None:
+            ids = []
+            mins = []
+            maxs = []
+            for cell_id, node_ids in rows:
+                pts = [node_xyz.get(int(nid)) for nid in (node_ids or [])]
+                pts = [p for p in pts if p is not None]
+                if not pts:
                     continue
-                s = float(n[0] * xyz[0] + n[1] * xyz[1] + n[2] * xyz[2] + d)
-                s_min = s if s_min is None else min(s_min, s)
-                s_max = s if s_max is None else max(s_max, s)
-            if s_min is None:
-                continue
-            if s_min <= eps and s_max >= -eps:
-                out.append(int(cell_id))
-        return np.array(out, dtype=np.int32)
+                xyz = np.asarray(pts, dtype=np.float64)
+                ids.append(int(cell_id))
+                mins.append(np.min(xyz, axis=0))
+                maxs.append(np.max(xyz, axis=0))
+            self._plane_bbox_cache = (
+                np.asarray(ids, dtype=np.int32),
+                np.asarray(mins, dtype=np.float64).reshape(-1, 3),
+                np.asarray(maxs, dtype=np.float64).reshape(-1, 3),
+            )
+            if cache_key is not None:
+                _PLANE_BBOX_CACHE[cache_key] = self._plane_bbox_cache
+                while len(_PLANE_BBOX_CACHE) > _PLANE_BBOX_CACHE_LIMIT:
+                    _PLANE_BBOX_CACHE.popitem(last=False)
+
+        ids, mins, maxs = self._plane_bbox_cache
+        if ids.size == 0:
+            return np.zeros((0,), dtype=np.int32)
+        centers = 0.5 * (mins + maxs)
+        extents = 0.5 * (maxs - mins)
+        signed = (centers - p0) @ n
+        radius = extents @ np.abs(n)
+        return ids[np.abs(signed) <= radius + float(eps)].astype(np.int32, copy=False)
 

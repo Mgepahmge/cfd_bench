@@ -6,11 +6,14 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from cfd_bench.core.context import MeshContext
+from cfd_bench.core.runtime_mesh import RuntimeMeshData
 from cfd_bench.core.types import LiteMesh, LitePolyData
 from cfd_bench.infra.iotdb.config import IoTDBConfig
 from cfd_bench.infra.iotdb.mesh_runtime import MeshRuntime
 from cfd_bench.infra.iotdb.repository import IoTDBRepository
 from cfd_bench.mesh_ops import (
+    bboxes_for_cell_ids,
+    cells_in_coordinate_range,
     compute_qcriterion_roi,
     iotdb_extract_submesh,
     iotdb_isosurface_extraction,
@@ -30,6 +33,7 @@ class IoTDBMeshClient(AbstractContextManager):
         self.repo = IoTDBRepository(self.config)
         self.runtime = MeshRuntime(self.repo)
         self.ctx: Optional[MeshContext] = None
+        self._surface_cells_normals_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
     def __enter__(self):
         self.open()
@@ -96,12 +100,35 @@ class IoTDBMeshClient(AbstractContextManager):
                 pass
 
         self.ctx = ctx
+        self._surface_cells_normals_cache = None
         return ctx
 
     def _require_ctx(self) -> MeshContext:
         if self.ctx is None:
             raise RuntimeError("请先调用 connect(...) 初始化上下文")
         return self.ctx
+
+    def get_cell_count(self) -> int:
+        ctx = self._require_ctx()
+        try:
+            return int(self.repo.fetch_mesh_meta(ctx.dataset_key, ctx.zone).get("cell_count", 0))
+        except Exception:
+            return len(self.runtime.ensure_cells(ctx.dataset_key, ctx.zone).cells)
+
+    def get_mesh_bounds(self):
+        ctx = self._require_ctx()
+        try:
+            meta = self.repo.fetch_mesh_meta(ctx.dataset_key, ctx.zone)
+            vals = [
+                meta.get("bbox_min_x"), meta.get("bbox_max_x"),
+                meta.get("bbox_min_y"), meta.get("bbox_max_y"),
+                meta.get("bbox_min_z"), meta.get("bbox_max_z"),
+            ]
+            if all(v is not None and np.isfinite(float(v)) for v in vals):
+                return [float(v) for v in vals]
+        except Exception:
+            pass
+        return None
 
     def point_query(self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None) -> np.ndarray:
         ctx = self._require_ctx()
@@ -111,6 +138,14 @@ class IoTDBMeshClient(AbstractContextManager):
         )
         out = [scalar_map.get(int(cid), np.nan) for cid in cell_indexes]
         return np.array(out, dtype=np.float64)
+
+    def velocity_query(self, cell_indexes: Sequence[int], step: Optional[int] = None) -> np.ndarray:
+        """Fetch U/V/W in one backend round-trip for W4/W5/W7-style access."""
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        ids = [int(cid) for cid in cell_indexes]
+        values = self.repo.fetch_velocity_map(ctx.dataset_key, ts, ids, zone=ctx.zone)
+        return np.asarray([values.get(cid, (np.nan, np.nan, np.nan)) for cid in ids], dtype=np.float64)
 
     def range_query_var(
         self, lower_bound: float, upper_bound: float, attribute_name: str, step: Optional[int] = None
@@ -125,13 +160,7 @@ class IoTDBMeshClient(AbstractContextManager):
     def range_query_coord(self, lower_bound: Sequence[float], upper_bound: Sequence[float]) -> np.ndarray:
         ctx = self._require_ctx()
         data = self.runtime.ensure_cells(ctx.dataset_key, ctx.zone)
-        x0, y0, z0 = map(float, lower_bound)
-        x1, y1, z1 = map(float, upper_bound)
-        out = []
-        for cid, bb in data.cell_bbox.items():
-            if bb[0] >= x0 and bb[1] <= x1 and bb[2] >= y0 and bb[3] <= y1 and bb[4] >= z0 and bb[5] <= z1:
-                out.append(int(cid))
-        return np.array(out, dtype=np.int32)
+        return cells_in_coordinate_range(data, lower_bound, upper_bound)
 
     def point_intersection(self, points: np.ndarray) -> np.ndarray:
         ctx = self._require_ctx()
@@ -150,8 +179,22 @@ class IoTDBMeshClient(AbstractContextManager):
 
     def extract_submesh(self, cell_indexes: Sequence[int], mesh_handle=None) -> LiteMesh:
         ctx = self._require_ctx()
+        ids = sorted(set(int(x) for x in cell_indexes if int(x) >= 0))
+        cells_data = self.runtime.ensure_cells(ctx.dataset_key, ctx.zone)
+        # W3 usually selects a small fraction of a large mesh.  Avoid loading
+        # the complete node/connectivity tables just to extract that subset.
+        if ids and len(ids) < max(1024, int(0.25 * max(1, len(cells_data.cells)))):
+            cell_nodes = self.repo.fetch_cell_nodes_subset(ctx.dataset_key, ctx.zone, ids)
+            node_ids = sorted({nid for row in cell_nodes.values() for nid in row})
+            nodes = self.repo.fetch_nodes_subset(ctx.dataset_key, ctx.zone, node_ids)
+            return LiteMesh(
+                cell_ids=np.asarray([cid for cid in ids if cid in cell_nodes], dtype=np.int32),
+                node_xyz=nodes,
+                cell_nodes=cell_nodes,
+                cell_bbox=bboxes_for_cell_ids(cells_data, ids),
+            )
         data = self.runtime.ensure_cell_nodes(ctx.dataset_key, ctx.zone)
-        return iotdb_extract_submesh(data, cell_indexes)
+        return iotdb_extract_submesh(data, ids)
 
     def isosurface_extraction(self, variable_name: str, iso_value: float, step: Optional[int] = None) -> LitePolyData:
         ctx = self._require_ctx()
@@ -162,6 +205,19 @@ class IoTDBMeshClient(AbstractContextManager):
             ctx.dataset_key, ts, variable_name, cell_ids, zone=ctx.zone
         )
         return iotdb_isosurface_extraction(data, scalar_map, float(iso_value))
+
+    def isosurface_from_submesh(
+        self, mesh: LiteMesh, variable_name: str, iso_value: float, step: Optional[int] = None
+    ) -> LitePolyData:
+        """Run W3 on the already selected submesh instead of the full mesh."""
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        cell_ids = [int(x) for x in mesh.cell_ids.tolist()]
+        scalar_map = self.repo.fetch_cell_scalar_map(
+            ctx.dataset_key, ts, variable_name, cell_ids, zone=ctx.zone
+        )
+        scoped = RuntimeMeshData(nodes=dict(mesh.node_xyz), cell_nodes=dict(mesh.cell_nodes))
+        return iotdb_isosurface_extraction(scoped, scalar_map, float(iso_value))
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
         # W6 database-geometry path.  Prefer persisted CFD boundary faces and
@@ -217,6 +273,9 @@ class IoTDBMeshClient(AbstractContextManager):
         geometry fallback.  The returned cell ids are explicit because
         boundary-face owners are not necessarily ``0..N-1``.
         """
+        cached = getattr(self, "_surface_cells_normals_cache", None)
+        if cached is not None:
+            return cached
         ctx = self._require_ctx()
         boundary = self.repo.fetch_boundary_faces(ctx.dataset_key, ctx.zone)
         if boundary:
@@ -233,7 +292,9 @@ class IoTDBMeshClient(AbstractContextManager):
                 n = acc[:3] / max(float(acc[3]), 1e-15)
                 length = float(np.linalg.norm(n))
                 normals.append(n / length if length > 1e-15 else np.array([1.0, 0.0, 0.0]))
-            return cell_ids, np.asarray(normals, dtype=np.float64)
+            result = (cell_ids, np.asarray(normals, dtype=np.float64))
+            self._surface_cells_normals_cache = result
+            return result
 
         # ``ensure_cell_nodes`` loads nodes/connectivity only; it does not
         # populate ``RuntimeMeshData.cells``. W6 enumerates element ids here,
@@ -252,7 +313,9 @@ class IoTDBMeshClient(AbstractContextManager):
             normals.append(self._normal_from_points(points))
         if not normals:
             return cell_ids, np.zeros((0, 3), dtype=np.float64)
-        return cell_ids, np.asarray(normals, dtype=np.float64)
+        result = (cell_ids, np.asarray(normals, dtype=np.float64))
+        self._surface_cells_normals_cache = result
+        return result
 
     def resolve_w6_scalar(self, candidates: Sequence[str] = ("P", "U", "V", "W", "K", "E")) -> str:
         """Choose an available cell scalar for W6, preferring pressure.

@@ -17,6 +17,7 @@ class TileDBRepository:
         self._h5_steps_cache: Dict[str, List[int]] = {}
         self._node_source_cache: Dict[Tuple[str, str], np.ndarray] = {}
         self._cell_source_cache: Dict[Tuple[str, str], np.ndarray] = {}
+        self._var_range_cache: Dict[Tuple[str, int, str, str], Tuple[float, float]] = {}
 
     # -------------------- path helpers --------------------
     def _base(self, dataset_key: str) -> str:
@@ -129,6 +130,35 @@ class TileDBRepository:
                 out[nid] = (float(data["x"][j]), float(data["y"][j]), float(data["z"][j]))
         return out
 
+    def fetch_nodes_subset(
+        self, dataset_key: str, zone: str, node_ids: Sequence[int]
+    ) -> Dict[int, Tuple[float, float, float]]:
+        ids = sorted(set(int(x) for x in node_ids if int(x) >= 0))
+        if not ids:
+            return {}
+        uri = self.path_mesh_static(dataset_key, zone, "nodes")
+        raw = self._read_dense_attrs_at_ids(uri, ["x", "y", "z"], ids)
+        return {
+            nid: (float(raw["x"][nid]), float(raw["y"][nid]), float(raw["z"][nid]))
+            for nid in ids
+            if nid in raw["x"] and nid in raw["y"] and nid in raw["z"]
+        }
+
+    def fetch_cell_nodes_subset(
+        self, dataset_key: str, zone: str, cell_ids: Sequence[int]
+    ) -> Dict[int, List[int]]:
+        ids = sorted(set(int(x) for x in cell_ids if int(x) >= 0))
+        if not ids:
+            return {}
+        uri = self.path_mesh_static(dataset_key, zone, "cell_nodes")
+        cols = [f"node_id_{i}" for i in range(16)]
+        raw = self._read_dense_attrs_at_ids(uri, cols, ids)
+        out = {}
+        for cid in ids:
+            vals = [int(raw[col][cid]) for col in cols if cid in raw[col] and int(raw[col][cid]) >= 0]
+            out[cid] = vals
+        return out
+
     def fetch_cell_nodes(self, dataset_key: str, zone: str) -> Dict[int, List[int]]:
         uri = self.path_mesh_static(dataset_key, zone, "cell_nodes")
         out: Dict[int, List[int]] = {}
@@ -229,6 +259,59 @@ class TileDBRepository:
             return uri
         raise FileNotFoundError(f"cell vars not found for {dataset_key} step={step} zone={zone}")
 
+    def _read_dense_attrs_at_ids(
+        self, uri: str, attrs: Sequence[str], cell_ids: Sequence[int]
+    ) -> Dict[str, Dict[int, object]]:
+        """Read only requested dense-array rows, coalescing contiguous ids.
+
+        The historical implementation used ``A[:]`` even for a single cell.
+        On multi-million-cell CFD frames that turned W4/W5 point lookups into
+        full-frame scans.  Coalesced slices keep the same schema/API while
+        letting TileDB read only the tiles/ranges that are actually needed.
+        """
+        ids = sorted(set(int(i) for i in cell_ids if int(i) >= 0))
+        out = {str(attr): {} for attr in attrs}
+        if not ids:
+            return out
+
+        ranges = []
+        a = b = ids[0]
+        for cid in ids[1:]:
+            if cid == b + 1:
+                b = cid
+            else:
+                ranges.append((a, b + 1))
+                a = b = cid
+        ranges.append((a, b + 1))
+
+        with self.open_array(uri, "r") as A:
+            # Newer TileDB-Py releases support multi-range indexing directly.
+            # Use it when possible so scattered line/plane hits do not become
+            # thousands of Python slice calls.
+            if len(ranges) > 1:
+                try:
+                    query = A.query(attrs=list(attrs))
+                    data = query.multi_index[ids]
+                    for attr in attrs:
+                        arr = np.asarray(data[str(attr)]).reshape(-1)
+                        for cid, value in zip(ids, arr):
+                            out[str(attr)][int(cid)] = value.item() if hasattr(value, "item") else value
+                    return out
+                except Exception:
+                    pass
+            for start, end in ranges:
+                try:
+                    data = A.query(attrs=list(attrs))[start:end]
+                except Exception:
+                    data = A[start:end]
+                count = end - start
+                for attr in attrs:
+                    arr = np.asarray(data[str(attr)]).reshape(-1)
+                    for offset in range(min(count, arr.size)):
+                        value = arr[offset]
+                        out[str(attr)][start + offset] = value.item() if hasattr(value, "item") else value
+        return out
+
     def fetch_cell_scalar_map(
         self, dataset_key: str, step: int, var: str, cell_ids: Sequence[int], zone: str = "0_Fluid"
     ) -> Dict[int, float]:
@@ -236,28 +319,41 @@ class TileDBRepository:
         if not norm_ids:
             return {}
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
-        with self.open_array(uri, "r") as A:
-            data = A[:]
-            arr = np.asarray(data[var], dtype=np.float64)
-            return {int(cid): float(arr[cid]) for cid in norm_ids}
+        raw = self._read_dense_attrs_at_ids(uri, [str(var)], norm_ids)[str(var)]
+        return {cid: float(value) for cid, value in raw.items()}
 
     def fetch_all_cell_scalars(
         self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"
     ) -> np.ndarray:
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
-            return np.asarray(A[:][var], dtype=np.float64)
+            try:
+                data = A.query(attrs=[str(var)])[:]
+            except Exception:
+                data = A[:]
+            return np.asarray(data[str(var)], dtype=np.float64)
 
     def fetch_cell_ids_by_var_range(
         self, dataset_key: str, step: int, var: str, lower: float, upper: float, zone: str = "0_Fluid"
     ) -> List[int]:
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
+        lo, hi = sorted((float(lower), float(upper)))
+        # Prefer TileDB's native QueryCondition so filtering runs in the C++
+        # engine and only matching coordinates cross the Python boundary.
         with self.open_array(uri, "r") as A:
-            data = A[:]
-            index_arr = np.arange(len(data[var]), dtype=np.int32)
-            var_arr = np.asarray(data[var], dtype=np.float64)
-        mask = (var_arr >= float(lower)) & (var_arr <= float(upper))
-        return [int(i) for i in index_arr[mask]]
+            cond = f"{str(var)} >= {lo} and {str(var)} <= {hi}"
+            try:
+                result = A.query(attrs=[str(var)], dims=["cell_id"], cond=cond)[:]
+                if "cell_id" in result:
+                    return [int(x) for x in np.asarray(result["cell_id"]).reshape(-1)]
+            except Exception:
+                pass
+            try:
+                data = A.query(attrs=[str(var)])[:]
+            except Exception:
+                data = A[:]
+            var_arr = np.asarray(data[str(var)], dtype=np.float64).reshape(-1)
+        return np.flatnonzero((var_arr >= lo) & (var_arr <= hi)).astype(np.int64).tolist()
 
     def fetch_velocity_map(
         self, dataset_key: str, step: int, cell_ids: Sequence[int], zone: str = "0_Fluid"
@@ -266,12 +362,12 @@ class TileDBRepository:
         if not norm_ids:
             return {}
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
-        with self.open_array(uri, "r") as A:
-            data = A[:]
-            return {
-                int(cid): (float(data["U"][cid]), float(data["V"][cid]), float(data["W"][cid]))
-                for cid in norm_ids
-            }
+        values = self._read_dense_attrs_at_ids(uri, ["U", "V", "W"], norm_ids)
+        return {
+            cid: (float(values["U"][cid]), float(values["V"][cid]), float(values["W"][cid]))
+            for cid in sorted(set(norm_ids))
+            if cid in values["U"] and cid in values["V"] and cid in values["W"]
+        }
 
     def fetch_qcriterion_by_roi(
         self,
@@ -397,6 +493,10 @@ class TileDBRepository:
     def fetch_var_value_range(
         self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"
     ) -> Tuple[float, float]:
+        key = (str(dataset_key), int(step), str(zone), str(var).upper())
+        cached = self._var_range_cache.get(key)
+        if cached is not None:
+            return cached
         uri = self._resolve_cell_vars_uri(dataset_key, step, zone)
         with self.open_array(uri, "r") as A:
             try:
@@ -407,7 +507,9 @@ class TileDBRepository:
         arr = arr[np.isfinite(arr)]
         if not arr.size:
             raise ValueError(f"no values for {dataset_key} step={step} var={var}")
-        return float(np.min(arr)), float(np.max(arr))
+        result = (float(np.min(arr)), float(np.max(arr)))
+        self._var_range_cache[key] = result
+        return result
 
     def fetch_max_diffs(
         self, dataset_key: str, step: int, variables: Sequence[str]
@@ -472,7 +574,7 @@ class TileDBRepository:
                 f"cz >= {float(lo[2])} and cz <= {float(hi[2])}"
             )
             try:
-                result = A.query(attrs=[], dims=["cell_id"], cond=cond)[:]
+                result = A.query(attrs=[str(var)], dims=["cell_id"], cond=cond)[:]
                 dense_ids = np.asarray(result["cell_id"], dtype=np.int64).reshape(-1)
             except Exception:
                 data = A.query(attrs=["cx", "cy", "cz"])[:] if hasattr(A, "query") else A[:]

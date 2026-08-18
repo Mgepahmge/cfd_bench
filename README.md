@@ -293,3 +293,11 @@ export CFD_BENCH_IOTDB_ROOT_PATH=root.simulation_data
 `ingest-h5` also exposes `--iotdb-*` one-command overrides. PostgreSQL defaults and commands are unchanged when `--backends` is omitted.
 
 Install HDF5 support with `pip install 'cfd_bench[h5]'`; backend loading additionally requires the corresponding extra: `cfd_bench[postgresql]`, `cfd_bench[iotdb]`, or `cfd_bench[tiledb]`.
+
+## Large-mesh runtime performance (v12)
+
+W1-W8 keep the historical benchmark-duration semantics: `--duration` is still the target time window for each benchmark loop, not a hard per-transaction deadline. v12 improves large-mesh scaling without changing the persisted PostgreSQL, IoTDB, or TileDB schemas, so existing ingests can be reused.
+
+The runtime now treats mesh topology as immutable benchmark state. IoTDB and TileDB share a small process-local static-mesh cache across workload/timestep clients, hot geometry paths operate on contiguous NumPy centroid/AABB arrays rather than rebuilding Python dictionaries, and line/plane/range tests are vectorized. PostgreSQL point location keeps candidate ranking in SQL instead of downloading all centroids; PostgreSQL plane AABBs and W7 static centroid/adjacency state are reused across timesteps.
+
+TileDB scalar/velocity point reads now fetch requested rows/ranges instead of `A[:]`, W4/W5 fetch U/V/W in one backend operation, W8 caches per-frame variable ranges, W6 caches static surface normals, and W3 performs topology/node/scalar reads on the selected submesh when possible instead of repeatedly materializing the whole mesh. These are runtime-only changes: no re-ingest is required.

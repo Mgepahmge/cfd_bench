@@ -23,6 +23,10 @@ class PostgreSQLMeshClient:
         self.ctx: Optional[MeshContext] = None
         self._key: Optional[DatasetKey] = None
         self._centroids_cache: Optional[Dict] = None
+        self._var_range_cache: Dict[Tuple[int, str], Tuple[float, float]] = {}
+        self._surface_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._qc_centroids_cache: Optional[Dict] = None
+        self._qc_neighbors_cache: Optional[Dict] = None
 
     def _ensure_inner(self):
         if self._inner is None:
@@ -46,6 +50,10 @@ class PostgreSQLMeshClient:
             self._inner = None
         self.runtime = None
         self._centroids_cache = None
+        self._var_range_cache.clear()
+        self._surface_cache = None
+        self._qc_centroids_cache = None
+        self._qc_neighbors_cache = None
 
     def connect(
         self,
@@ -57,6 +65,10 @@ class PostgreSQLMeshClient:
         self._key = parse_dataset_key(dataset_key, zone=zone, step=step)
         self._inner = None
         self._centroids_cache = None
+        self._var_range_cache.clear()
+        self._surface_cache = None
+        self._qc_centroids_cache = None
+        self._qc_neighbors_cache = None
         self._ensure_inner()
         ctx = MeshContext(dataset_key=self._key.dataset_key, step=int(step), zone=zone)
         conn = self._inner.conn
@@ -109,6 +121,11 @@ class PostgreSQLMeshClient:
         ts = ctx.step if step is None else int(step)
         if self._inner is not None:
             self._inner.timestep = int(ts)
+
+    def get_mesh_bounds(self):
+        self._ensure_inner()
+        key = self._key
+        return pg_spatial.fetch_mesh_bounds(self._inner.conn, key.ship, key.scale, key.zone)
 
     def get_cell_count(self) -> int:
         self._ensure_inner()
@@ -190,15 +207,48 @@ class PostgreSQLMeshClient:
         self._ensure_inner()
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        key = self._key
-        return pg_spatial.fetch_var_value_range(
-            self._inner.conn, key.ship, key.scale, key.zone, ts, attribute_name
-        )
+        cache_key = (ts, str(attribute_name).upper())
+        if cache_key not in self._var_range_cache:
+            key = self._key
+            self._var_range_cache[cache_key] = pg_spatial.fetch_var_value_range(
+                self._inner.conn, key.ship, key.scale, key.zone, ts, attribute_name
+            )
+        return self._var_range_cache[cache_key]
 
     def point_query(self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None) -> np.ndarray:
         self._ensure_inner()
         self._sync_timestep(step)
         return self._inner.point_query(None, cell_indexes, attribute_name, timestep=step)
+
+    def velocity_query(self, cell_indexes: Sequence[int], step: Optional[int] = None) -> np.ndarray:
+        """Fetch U/V/W for cells with one SQL query instead of three point queries."""
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        ids = [int(cid) for cid in cell_indexes]
+        if not ids:
+            return np.zeros((0, 3), dtype=np.float64)
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT cell_id,
+                       MAX(value) FILTER (WHERE var='U') AS u,
+                       MAX(value) FILTER (WHERE var='V') AS v,
+                       MAX(value) FILTER (WHERE var='W') AS w
+                FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                  AND timestep=%s AND var IN ('U','V','W')
+                  AND cell_id = ANY(%s)
+                GROUP BY cell_id
+                """,
+                (key.ship, key.scale, key.zone, ts, ids),
+            )
+            rows = {int(cid): (float(u), float(v), float(w)) for cid, u, v, w in cur.fetchall() if u is not None and v is not None and w is not None}
+        finally:
+            cur.close()
+        return np.asarray([rows.get(cid, (np.nan, np.nan, np.nan)) for cid in ids], dtype=np.float64)
 
     def range_query_var(
         self, lower_bound: float, upper_bound: float, attribute_name: str, step: Optional[int] = None
@@ -217,12 +267,11 @@ class PostgreSQLMeshClient:
     def point_intersection(self, points: np.ndarray) -> np.ndarray:
         self._ensure_inner()
         key = self._key
-        if self._centroids_cache is None:
-            self._centroids_cache = pg_spatial._fetch_centroids_map(
-                self._inner.conn, key.ship, key.scale, key.zone
-            )
+        # Keep candidate ranking inside PostgreSQL.  Loading the full centroid
+        # table into Python made a single point workload scale with total mesh
+        # size even though point_locator_grid already narrows the candidates.
         return pg_spatial.point_intersection(
-            self._inner.conn, key.ship, key.scale, key.zone, points, self._centroids_cache
+            self._inner.conn, key.ship, key.scale, key.zone, points, None
         )
 
     def line_intersection(self, line_start: Sequence[float], line_end: Sequence[float]) -> np.ndarray:
@@ -235,7 +284,35 @@ class PostgreSQLMeshClient:
 
     def extract_submesh(self, cell_indexes: Sequence[int], mesh_handle=None) -> LiteMesh:
         self._ensure_inner()
-        return self.runtime.extract_submesh(cell_indexes)
+        ids = sorted(set(int(x) for x in cell_indexes if int(x) >= 0))
+        if not ids:
+            return LiteMesh(
+                cell_ids=np.zeros((0,), dtype=np.int32), node_xyz={}, cell_nodes={}, cell_bbox={}
+            )
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """SELECT cell_id, node_ids FROM cell_nodes
+                   WHERE ship_type=%s AND scale=%s AND zone_type=%s AND cell_id = ANY(%s)""",
+                (key.ship, key.scale, key.zone, ids),
+            )
+            cell_nodes = {int(cid): [int(n) for n in (nids or [])] for cid, nids in cur.fetchall()}
+            node_ids = sorted({nid for row in cell_nodes.values() for nid in row})
+            cur.execute(
+                """SELECT node_id,x,y,z FROM node_coordinates
+                   WHERE ship_type=%s AND scale=%s AND zone_type=%s AND node_id = ANY(%s)""",
+                (key.ship, key.scale, key.zone, node_ids),
+            )
+            nodes = {int(nid): (float(x), float(y), float(z)) for nid, x, y, z in cur.fetchall()}
+        finally:
+            cur.close()
+        return LiteMesh(
+            cell_ids=np.asarray(sorted(cell_nodes), dtype=np.int32),
+            node_xyz=nodes,
+            cell_nodes=cell_nodes,
+            cell_bbox={},
+        )
 
     def isosurface_extraction(self, variable_name: str, iso_value: float, step: Optional[int] = None) -> LitePolyData:
         self._ensure_inner()
@@ -265,6 +342,28 @@ class PostgreSQLMeshClient:
         finally:
             cur.close()
         return self.runtime.isosurface(scalar_map, float(iso_value))
+
+    def isosurface_from_submesh(
+        self, mesh: LiteMesh, variable_name: str, iso_value: float, step: Optional[int] = None
+    ) -> LitePolyData:
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        ids = [int(x) for x in mesh.cell_ids.tolist()]
+        if not ids:
+            return self.runtime.isosurface({}, float(iso_value), mesh=mesh)
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """SELECT cell_id,value FROM cell_scalar
+                   WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                     AND timestep=%s AND var=%s AND cell_id = ANY(%s)""",
+                (self._key.ship, self._key.scale, self._key.zone, ts, str(variable_name).upper(), ids),
+            )
+            scalar_map = {int(cid): float(v) for cid, v in cur.fetchall()}
+        finally:
+            cur.close()
+        return self.runtime.isosurface(scalar_map, float(iso_value), mesh=mesh)
 
     def is_h5_dataset(self) -> bool:
         """Whether the connected dataset was ingested from the ODB-like HDF5 path."""
@@ -491,11 +590,12 @@ class PostgreSQLMeshClient:
 
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
         self._ensure_inner()
-        key = self._key
-        _, norms = pg_spatial.fetch_boundary_normals(
-            self._inner.conn, key.ship, key.scale, key.zone
-        )
-        return norms
+        if self._surface_cache is None:
+            key = self._key
+            self._surface_cache = pg_spatial.fetch_boundary_normals(
+                self._inner.conn, key.ship, key.scale, key.zone
+            )
+        return self._surface_cache[1]
 
     def compute_qcriterion_roi(
         self,
@@ -509,6 +609,14 @@ class PostgreSQLMeshClient:
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
         key = self._key
+        if self._qc_centroids_cache is None:
+            from cfd_bench.infra.postgresql.qc_ops import _fetch_centroids, _fetch_neighbors
+            self._qc_centroids_cache = _fetch_centroids(
+                self._inner.conn, key.ship, key.scale, key.zone
+            )
+            self._qc_neighbors_cache = _fetch_neighbors(
+                self._inner.conn, key.ship, key.scale, key.zone
+            )
         return pg_spatial.compute_qcriterion_roi(
             self._inner.conn,
             key.ship,
@@ -518,4 +626,6 @@ class PostgreSQLMeshClient:
             lower_bound,
             upper_bound,
             tau if tau is not None else 0.0,
+            centroids=self._qc_centroids_cache,
+            neighbors=self._qc_neighbors_cache,
         )

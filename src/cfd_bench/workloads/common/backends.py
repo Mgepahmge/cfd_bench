@@ -56,6 +56,13 @@ def make_vtk(vtk_dir: str, ship: str, step: int, zone: str = "0_Fluid"):
 
 
 def mesh_bounds_from_client(client) -> Optional[list]:
+    if hasattr(client, "get_mesh_bounds"):
+        try:
+            bounds = client.get_mesh_bounds()
+            if bounds is not None:
+                return list(bounds)
+        except Exception:
+            pass
     if hasattr(client, "runtime") and client.runtime is not None and hasattr(client, "ctx") and client.ctx is not None:
         try:
             data = client.runtime.ensure_cells(client.ctx.dataset_key, client.ctx.zone)

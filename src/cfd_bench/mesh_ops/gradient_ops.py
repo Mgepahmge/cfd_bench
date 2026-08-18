@@ -57,10 +57,10 @@ def compute_qcriterion_roi(
     fallback_zero: bool = False,
 ) -> Tuple[List[int], List[float]]:
     """Online Q-criterion for cells in ROI using adjacency + least-squares gradient."""
-    centroids = data.cell_centroid
     qc_rows: List[Tuple[int, float]] = []
     for cid in roi_cell_ids:
-        cxyz = centroids.get(int(cid))
+        crow = data.cells.get(int(cid))
+        cxyz = None if crow is None else (crow[0], crow[1], crow[2])
         cvel = velocity_map.get(int(cid))
         if cxyz is None or cvel is None:
             continue
@@ -68,9 +68,10 @@ def compute_qcriterion_roi(
         nb_xyz = []
         nb_vel = []
         for nb in nb_ids:
-            if nb not in velocity_map or nb not in centroids:
+            nrow = data.cells.get(int(nb))
+            if nb not in velocity_map or nrow is None:
                 continue
-            nb_xyz.append(centroids[nb])
+            nb_xyz.append((nrow[0], nrow[1], nrow[2]))
             nb_vel.append(velocity_map[nb])
         G = estimate_gradient_least_squares(
             cxyz,

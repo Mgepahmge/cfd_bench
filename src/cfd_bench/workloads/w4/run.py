@@ -49,8 +49,8 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
             def pg_scalar(cid, step):
                 pg.ctx.step = int(step)
                 pg._sync_timestep(int(step))
-                u, v, w = pg.point_query([cid], "U")[0], pg.point_query([cid], "V")[0], pg.point_query([cid], "W")[0]
-                return u, v, w
+                vel = pg.velocity_query([cid], step=step)[0]
+                return float(vel[0]), float(vel[1]), float(vel[2])
 
             _advect("PG", pg_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec)
             shared_bounds = bounds
@@ -64,11 +64,8 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
 
             def iot_scalar(cid, step):
                 iotdb.ctx.step = step
-                return (
-                    float(iotdb.point_query([cid], "U")[0]),
-                    float(iotdb.point_query([cid], "V")[0]),
-                    float(iotdb.point_query([cid], "W")[0]),
-                )
+                vel = iotdb.velocity_query([cid], step=step)[0]
+                return float(vel[0]), float(vel[1]), float(vel[2])
 
             _advect("IoTDB", iot_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec)
         iotdb.close()
@@ -81,11 +78,8 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
 
             def tdb_scalar(cid, step):
                 tiledb.ctx.step = step
-                return (
-                    float(tiledb.point_query([cid], "U")[0]),
-                    float(tiledb.point_query([cid], "V")[0]),
-                    float(tiledb.point_query([cid], "W")[0]),
-                )
+                vel = tiledb.velocity_query([cid], step=step)[0]
+                return float(vel[0]), float(vel[1]), float(vel[2])
 
             _advect("TileDB", tdb_scalar, geom.point_intersection, bounds, steps, cfg.duration_sec)
         tiledb.close()

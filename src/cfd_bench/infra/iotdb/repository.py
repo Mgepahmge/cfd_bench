@@ -53,6 +53,7 @@ class IoTDBRepository:
         self._cell_var_path_cache: Dict[Tuple[str, int, str], str] = {}
         self._h5_meta_cache: Dict[str, Dict[str, object]] = {}
         self._h5_steps_cache: Dict[str, List[int]] = {}
+        self._var_range_cache: Dict[Tuple[str, int, str, str], Tuple[float, float]] = {}
 
     def open(self):
         if self.session is not None:
@@ -147,11 +148,16 @@ class IoTDBRepository:
             norm_ids = [int(i) for i in list(cell_ids)]
         if len(norm_ids) == 0:
             return {}
-        idx = ",".join(str(i) for i in norm_ids)
         path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
-        sql = f"SELECT {var} FROM {path} WHERE Time IN ({idx});"
-        rows = self.query_rows(sql)
-        return {cid: _to_float(vals[0]) for cid, vals in rows}
+        out: Dict[int, float] = {}
+        for start in range(0, len(norm_ids), 5000):
+            ids = norm_ids[start:start + 5000]
+            idx = ",".join(str(i) for i in ids)
+            sql = f"SELECT {var} FROM {path} WHERE Time IN ({idx});"
+            for cid, vals in self.query_rows(sql):
+                if vals:
+                    out[int(cid)] = _to_float(vals[0])
+        return out
 
     def fetch_cell_ids_by_var_range(
         self,
@@ -262,6 +268,53 @@ class IoTDBRepository:
     def fetch_nodes(self, dataset_key: str, zone: str) -> Dict[int, Tuple[float, float, float]]:
         sql = f"SELECT x,y,z FROM {self.path_mesh_static(dataset_key, zone, 'nodes')};"
         return {nid: (_to_float(v[0]), _to_float(v[1]), _to_float(v[2])) for nid, v in self.query_rows(sql)}
+
+    def fetch_mesh_meta(self, dataset_key: str, zone: str) -> Dict[str, float]:
+        path = self.path_mesh_static(dataset_key, zone, "mesh_meta")
+        fields = [
+            "node_count", "cell_count", "face_count",
+            "bbox_min_x", "bbox_max_x", "bbox_min_y", "bbox_max_y",
+            "bbox_min_z", "bbox_max_z",
+        ]
+        rows = self.query_rows(f"SELECT {','.join(fields)} FROM {path} LIMIT 1;")
+        if not rows or not rows[0][1]:
+            return {}
+        vals = rows[0][1]
+        return {name: _to_float(vals[i]) for i, name in enumerate(fields) if i < len(vals)}
+
+    def fetch_nodes_subset(
+        self, dataset_key: str, zone: str, node_ids: Sequence[int]
+    ) -> Dict[int, Tuple[float, float, float]]:
+        ids = sorted(set(int(x) for x in node_ids if int(x) >= 0))
+        if not ids:
+            return {}
+        path = self.path_mesh_static(dataset_key, zone, "nodes")
+        out = {}
+        for start in range(0, len(ids), 5000):
+            chunk = ids[start:start + 5000]
+            idx = ",".join(str(x) for x in chunk)
+            for nid, vals in self.query_rows(f"SELECT x,y,z FROM {path} WHERE Time IN ({idx});"):
+                if len(vals) >= 3:
+                    out[int(nid)] = (_to_float(vals[0]), _to_float(vals[1]), _to_float(vals[2]))
+        return out
+
+    def fetch_cell_nodes_subset(
+        self, dataset_key: str, zone: str, cell_ids: Sequence[int]
+    ) -> Dict[int, List[int]]:
+        ids = sorted(set(int(x) for x in cell_ids if int(x) >= 0))
+        if not ids:
+            return {}
+        width = self._mesh_meta_int(dataset_key, zone, "max_nodes_per_cell", 16)
+        fields = ",".join(f"node_id_{i}" for i in range(width))
+        path = self.path_mesh_static(dataset_key, zone, "cell_nodes")
+        out = {}
+        for start in range(0, len(ids), 5000):
+            chunk = ids[start:start + 5000]
+            idx = ",".join(str(x) for x in chunk)
+            for cid, vals in self.query_rows(f"SELECT {fields} FROM {path} WHERE Time IN ({idx});"):
+                row = [_to_int(v, -1) for v in vals]
+                out[int(cid)] = [x for x in row if x >= 0]
+        return out
 
     def _mesh_meta_int(self, dataset_key: str, zone: str, field: str, default: int) -> int:
         try:
@@ -409,23 +462,31 @@ class IoTDBRepository:
     def fetch_var_value_range(
         self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"
     ) -> Tuple[float, float]:
+        key = (str(dataset_key), int(step), str(zone), str(var).upper())
+        cached = self._var_range_cache.get(key)
+        if cached is not None:
+            return cached
         path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
+        result = None
         try:
             rows = self.query_rows(
                 f"SELECT MIN_VALUE({var}),MAX_VALUE({var}) FROM {path};"
             )
             if rows and len(rows[0][1]) >= 2:
-                return _to_float(rows[0][1][0]), _to_float(rows[0][1][1])
+                result = (_to_float(rows[0][1][0]), _to_float(rows[0][1][1]))
         except Exception:
             pass
-        values = [
-            _to_float(vals[0])
-            for _, vals in self.query_rows(f"SELECT {var} FROM {path};")
-            if vals and np.isfinite(_to_float(vals[0]))
-        ]
-        if not values:
-            raise ValueError(f"no values for {dataset_key} step={step} var={var}")
-        return float(np.min(values)), float(np.max(values))
+        if result is None:
+            values = [
+                _to_float(vals[0])
+                for _, vals in self.query_rows(f"SELECT {var} FROM {path};")
+                if vals and np.isfinite(_to_float(vals[0]))
+            ]
+            if not values:
+                raise ValueError(f"no values for {dataset_key} step={step} var={var}")
+            result = (float(np.min(values)), float(np.max(values)))
+        self._var_range_cache[key] = (float(result[0]), float(result[1]))
+        return self._var_range_cache[key]
 
     def fetch_max_diffs(
         self, dataset_key: str, step: int, variables: Sequence[str]

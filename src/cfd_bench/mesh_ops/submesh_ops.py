@@ -6,6 +6,7 @@ import numpy as np
 
 from cfd_bench.core.runtime_mesh import RuntimeMeshData
 from cfd_bench.core.types import LiteMesh
+from cfd_bench.mesh_ops.geometry_ops import bboxes_for_cell_ids
 
 
 def iotdb_extract_submesh(data: RuntimeMeshData, cell_indexes: Sequence[int]) -> LiteMesh:
@@ -19,7 +20,7 @@ def iotdb_extract_submesh(data: RuntimeMeshData, cell_indexes: Sequence[int]) ->
 
     node_xyz = {nid: data.nodes[nid] for nid in node_ids if nid in data.nodes}
     cell_nodes = {cid: [int(n) for n in data.cell_nodes.get(cid, [])] for cid in picked}
-    cell_bbox = {cid: data.cell_bbox[cid] for cid in picked if cid in data.cell_bbox}
+    cell_bbox = bboxes_for_cell_ids(data, picked)
 
     return LiteMesh(
         cell_ids=np.array(sorted(picked_set), dtype=np.int32),
