@@ -32,6 +32,27 @@ def _bench(label, norm_fn, pressure_fn, n_cells, duration, *, progress=False, pr
     print(f"{label} W6: {txn} txns in {duration}s")
 
 
+def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
+    txn = 0
+    t0 = time.time()
+    with benchmark_progress("PG W6", duration, enabled=progress, interval=progress_interval) as prog:
+        while time.time() - t0 < duration:
+            prog.set_phase("surface cells + normals")
+            cells, normals = client.surface_cells_and_normals()
+            if len(cells) == 0 or len(normals) == 0:
+                break
+            prog.set_phase(f"scalar query {scalar_name} ({len(cells)} cells)")
+            values = client.point_query(cells, scalar_name)
+            n = min(len(normals), len(values))
+            if n == 0:
+                break
+            prog.set_phase("force reduction")
+            calculate_force(normals[:n], values[:n])
+            txn += 1
+            prog.transaction()
+    print(f"PG W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})")
+
+
 def _bench_iotdb_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
     """IoTDB-native W6 with explicit surface-cell ids.
 
@@ -84,11 +105,50 @@ def _bench_tiledb_native(client, scalar_name: str, duration: float, *, progress=
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
     if "postgresql" in backends:
-        pg = make_pg(ship, step, zone=cfg.zone_hull)
-        geom = make_geom_client(cfg, ship, step, pg, cfg.zone_hull)
-        n_cells = cell_count(geom)
-        _bench("PG", lambda: geom.surface_norm(), lambda c: pg.point_query(c, "P"), n_cells, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-        pg.close()
+        # Keep the already-validated H5/structural path byte-for-byte in
+        # behavior; only legacy CFD gets the generic zone/scalar fallback.
+        probe = make_pg(ship, step, zone=cfg.fluid_zone(ship))
+        h5_dataset = probe.is_h5_dataset()
+        if h5_dataset:
+            probe.close()
+            pg = make_pg(ship, step, zone=cfg.zone_hull)
+            geom = make_geom_client(cfg, ship, step, pg, cfg.zone_hull)
+            n_cells = cell_count(geom)
+            _bench("PG", lambda: geom.surface_norm(), lambda c: pg.point_query(c, "P"), n_cells, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            pg.close()
+        else:
+            try:
+                zones = probe.w6_zone_candidates(
+                    ship, preferred_zone=cfg.fluid_zone(ship), hull_hint=cfg.zone_hull
+                )
+            finally:
+                probe.close()
+            selected = None
+            last_error = None
+            candidates = ["P"] + list(cfg.valid_variables(ship))
+            for zone in zones:
+                stage("PostgreSQL W6", f"probe zone={zone}")
+                client = make_pg(ship, step, zone=zone)
+                try:
+                    cells, normals = client.surface_cells_and_normals()
+                    if len(cells) == 0 or len(normals) == 0:
+                        raise RuntimeError(f"no usable mesh cells in zone={zone}")
+                    scalar_name = client.resolve_w6_scalar(candidates)
+                    selected = (client, scalar_name)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    client.close()
+            if selected is None:
+                raise RuntimeError(
+                    f"PostgreSQL W6 could not find a usable zone/scalar for dataset={ship} "
+                    f"step={step}: {last_error}"
+                )
+            pg, scalar_name = selected
+            try:
+                _bench_pg_native(pg, scalar_name, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            finally:
+                pg.close()
 
     if "iotdb" in backends:
         if uses_vtk_geom(cfg):
@@ -108,13 +168,22 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             )
             iotdb.close()
         else:
-            # Prefer the physical hull zone for CFD.  Structural H5 datasets
-            # commonly have only the main mesh zone, so fall back to that
-            # without requiring a special ingest layout.
-            zones = []
-            for zone in (cfg.zone_hull, cfg.fluid_zone(ship)):
-                if zone and zone not in zones:
-                    zones.append(zone)
+            # Frozen H5 behavior keeps the historical two-zone probe. Canonical
+            # CFD metadata may expose differently named hull/wall zones, so
+            # legacy CFD uses the full discovered zone list.
+            probe = make_iotdb(ship, step, zone=cfg.fluid_zone(ship))
+            try:
+                if probe.is_h5_dataset():
+                    zones = []
+                    for zone in (cfg.zone_hull, cfg.fluid_zone(ship)):
+                        if zone and zone not in zones:
+                            zones.append(zone)
+                else:
+                    zones = probe.w6_zone_candidates(
+                        ship, preferred_zone=cfg.fluid_zone(ship), hull_hint=cfg.zone_hull
+                    )
+            finally:
+                probe.close()
             selected = None
             last_error = None
             candidates = ["P"] + list(cfg.valid_variables(ship))

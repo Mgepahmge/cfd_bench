@@ -53,6 +53,7 @@ class IoTDBRepository:
         self._cell_var_path_cache: Dict[Tuple[str, int, str], str] = {}
         self._h5_meta_cache: Dict[str, Dict[str, object]] = {}
         self._h5_steps_cache: Dict[str, List[int]] = {}
+        self._cfd_meta_cache: Dict[str, Dict[str, object]] = {}
         self._var_range_cache: Dict[Tuple[str, int, str, str], Tuple[float, float]] = {}
 
     def open(self):
@@ -98,6 +99,9 @@ class IoTDBRepository:
 
     def path_h5_metadata(self, dataset_key: str, leaf: str) -> str:
         return f"{self.config.root_path}.h5_metadata.{dataset_key}.{leaf}"
+
+    def path_cfd_metadata(self, dataset_key: str, leaf: str = "dataset_meta") -> str:
+        return f"{self.config.root_path}.cfd_metadata.{dataset_key}.{leaf}"
 
     # -------------------- generic query --------------------
     def query(self, sql: str):
@@ -476,6 +480,52 @@ class IoTDBRepository:
                 )
             )
         return out
+
+    # -------------------- legacy CFD discovery metadata --------------------
+    def cfd_dataset_metadata(self, dataset_key: str) -> Dict[str, object]:
+        """Read metadata written by the canonical DAT ingest path.
+
+        This lives under ``cfd_metadata`` so the frozen H5 metadata contract is
+        untouched.  Older IoTDB databases simply return an empty mapping and
+        retain the historical CLI overrides/defaults.
+        """
+        if dataset_key in self._cfd_meta_cache:
+            return dict(self._cfd_meta_cache[dataset_key])
+        path = self.path_cfd_metadata(dataset_key, "dataset_meta")
+        fields = [
+            "is_cfd", "zone", "zones_csv", "variables_csv",
+            "timesteps_csv", "node_count", "cell_count",
+        ]
+        try:
+            rows = self.query_rows(f"SELECT {','.join(fields)} FROM {path} LIMIT 1;")
+        except Exception:
+            return {}
+        if not rows or not rows[0][1]:
+            return {}
+        vals = list(rows[0][1]) + [None] * len(fields)
+
+        def csv_at(i, *, upper=False):
+            text = str(vals[i] or "").strip()
+            items = [x.strip() for x in text.split(",") if x.strip()]
+            return tuple(x.upper() for x in items) if upper else tuple(items)
+
+        steps = []
+        for token in csv_at(4):
+            try:
+                steps.append(int(token))
+            except Exception:
+                pass
+        result = {
+            "is_cfd": _to_bool(vals[0]),
+            "zone": str(vals[1] or "0_Fluid"),
+            "zones": csv_at(2),
+            "variables": csv_at(3, upper=True),
+            "timesteps": tuple(sorted(set(steps))),
+            "node_count": _to_int(vals[5], 0),
+            "cell_count": _to_int(vals[6], 0),
+        }
+        self._cfd_meta_cache[dataset_key] = dict(result)
+        return result
 
     # -------------------- H5 metadata / W9-W11 --------------------
     def h5_dataset_metadata(self, dataset_key: str) -> Dict[str, object]:

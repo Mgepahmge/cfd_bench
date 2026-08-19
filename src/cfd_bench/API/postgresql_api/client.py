@@ -588,6 +588,122 @@ class PostgreSQLMeshClient:
         finally:
             cur.close()
 
+    def w6_zone_candidates(
+        self, dataset_key: str, preferred_zone: Optional[str] = None, hull_hint: Optional[str] = None
+    ):
+        """Return legacy-CFD mesh zones in W6 preference order.
+
+        Used only by the CFD workload branch. H5 keeps its frozen W6 path.
+        """
+        self._ensure_inner()
+        key = parse_dataset_key(dataset_key)
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """SELECT DISTINCT zone_type FROM mesh_metadata
+                   WHERE ship_type=%s AND scale=%s ORDER BY zone_type""",
+                (key.ship, key.scale),
+            )
+            zones = [str(r[0]) for r in cur.fetchall()]
+            if not zones:
+                cur.execute(
+                    """SELECT DISTINCT zone_type FROM cell_centroid
+                       WHERE ship_type=%s AND scale=%s ORDER BY zone_type""",
+                    (key.ship, key.scale),
+                )
+                zones = [str(r[0]) for r in cur.fetchall()]
+        finally:
+            cur.close()
+        ordered = []
+        def add(zone):
+            if zone and zone in zones and zone not in ordered:
+                ordered.append(zone)
+        add(hull_hint)
+        for keyword in ("hull", "wall", "symmetry"):
+            for zone in zones:
+                if keyword in zone.lower():
+                    add(zone)
+        for zone in zones:
+            if "fluid" not in zone.lower():
+                add(zone)
+        add(preferred_zone)
+        for zone in zones:
+            add(zone)
+        return ordered
+
+    def resolve_w6_scalar(self, candidates=("P", "U", "V", "W", "K", "E")) -> str:
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ordered = []
+        for value in candidates:
+            name = str(value).strip().upper()
+            if name and name not in ordered:
+                ordered.append(name)
+        cur = self._inner.conn.cursor()
+        try:
+            for var in ordered:
+                cur.execute(
+                    """SELECT 1 FROM cell_scalar
+                       WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                         AND timestep=%s AND var=%s LIMIT 1""",
+                    (self._key.ship, self._key.scale, self._key.zone, int(ctx.step), var),
+                )
+                if cur.fetchone():
+                    return var
+        finally:
+            cur.close()
+        raise RuntimeError(
+            f"No usable PostgreSQL cell scalar for W6: dataset={ctx.dataset_key} "
+            f"step={ctx.step} zone={ctx.zone} candidates={ordered}"
+        )
+
+    @staticmethod
+    def _w6_normal_from_points(points) -> np.ndarray:
+        pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if len(pts) >= 3:
+            p0 = pts[0]
+            for i in range(1, len(pts) - 1):
+                n = np.cross(pts[i] - p0, pts[i + 1] - p0)
+                length = float(np.linalg.norm(n))
+                if length > 1e-15:
+                    return n / length
+        if len(pts) >= 2:
+            tangent = pts[1] - pts[0]
+            length = float(np.linalg.norm(tangent))
+            if length > 1e-15:
+                tangent /= length
+                axes = np.eye(3, dtype=np.float64)
+                axis = axes[int(np.argmin(np.abs(axes @ tangent)))]
+                n = np.cross(tangent, axis)
+                nlen = float(np.linalg.norm(n))
+                if nlen > 1e-15:
+                    return n / nlen
+        return np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+
+    def surface_cells_and_normals(self):
+        """Return CFD W6 cell ids aligned to boundary/fallback normals."""
+        self._ensure_inner()
+        if self._surface_cache is None:
+            key = self._key
+            self._surface_cache = pg_spatial.fetch_boundary_normals(
+                self._inner.conn, key.ship, key.scale, key.zone
+            )
+        cells, normals = self._surface_cache
+        if len(cells):
+            return np.asarray(cells, dtype=np.int32), np.asarray(normals, dtype=np.float64)
+
+        # Incomplete legacy datasets may have topology but no materialized
+        # boundary_face_geom. Build stable per-cell normals so W6 still runs.
+        data = self.runtime.ensure_cell_nodes()
+        ids = np.asarray(sorted(set(data.cells.keys()) | set(data.cell_nodes.keys())), dtype=np.int32)
+        out = []
+        for cid in ids:
+            pts = [data.nodes[n] for n in data.cell_nodes.get(int(cid), ()) if n in data.nodes]
+            out.append(self._w6_normal_from_points(pts))
+        if not out:
+            return ids, np.zeros((0, 3), dtype=np.float64)
+        return ids, np.asarray(out, dtype=np.float64)
+
     def surface_norm(self, mesh_handle=None) -> np.ndarray:
         self._ensure_inner()
         if self._surface_cache is None:

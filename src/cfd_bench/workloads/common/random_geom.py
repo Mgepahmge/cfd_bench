@@ -44,14 +44,18 @@ def random_coord_range(bounds: Sequence[float]) -> Tuple[NDArray[np.float64], ND
     return np.array([x1, y1, z1], dtype=np.float64), np.array([x2, y2, z2], dtype=np.float64)
 
 
-def random_start_point(intersect_fn, bounds: Sequence[float], *, deadline: float | None = None):
+def random_start_point(intersect_fn, bounds: Sequence[float], *, deadline: float | None = None, max_attempts: int | None = None):
     """Random point with exactly one containing cell.
 
     ``deadline`` is an optional ``time.monotonic()`` deadline used by
     long-running workloads so a sparse/degenerate mesh cannot trap the
     benchmark forever while searching for a valid start point.
     """
+    attempts = 0
     while deadline is None or time.monotonic() < deadline:
+        if max_attempts is not None and attempts >= int(max_attempts):
+            raise LookupError("no mesh hit after bounded start-point retries")
+        attempts += 1
         pt = random_points_in_bbox(bounds, count=1)[0]
         cells = intersect_fn(np.array([pt], dtype=np.float64))
         if len(cells) == 1:

@@ -125,6 +125,10 @@ def h5_metadata_uri(root: str, dataset_key: str, leaf: str = "dataset_meta") -> 
     return os.path.join(root, dataset_key, "h5_metadata", f"{leaf}.tdb")
 
 
+def cfd_metadata_uri(root: str, dataset_key: str, leaf: str = "dataset_meta") -> str:
+    return os.path.join(root, dataset_key, "cfd_metadata", f"{leaf}.tdb")
+
+
 def write_node_vars(uri: str, var_data: dict, node_count: int, var_names: Sequence[str], ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
     ensure_parent(uri)
     schema.create_dense_array(uri, schema.schema_node_vars(node_count, var_names, ctx), overwrite=overwrite, ctx=ctx)
@@ -195,6 +199,16 @@ def write_h5_dataset_meta(uri: str, meta: dict, ctx: Optional[tiledb.Ctx] = None
         A.meta["frames_json"] = json.dumps(meta.get("frames", []), ensure_ascii=True)
 
 
+def write_cfd_dataset_meta(uri: str, meta: dict, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
+    """Persist legacy CFD discovery metadata without touching H5 metadata."""
+    payload = dict(meta)
+    payload["is_h5"] = False
+    write_h5_dataset_meta(uri, payload, ctx=ctx, overwrite=overwrite)
+    c = ctx if ctx is not None else tiledb.Ctx()
+    with tiledb.open(uri, mode="w", ctx=c) as A:
+        A.meta["zones_csv"] = str(meta.get("zones_csv", ""))
+
+
 def write_max_diffs(uri: str, values: dict, ctx: Optional[tiledb.Ctx] = None, overwrite: bool = True):
     names = [str(v).upper() for v in sorted(values)]
     if not names:
@@ -206,4 +220,42 @@ def write_max_diffs(uri: str, values: dict, ctx: Optional[tiledb.Ctx] = None, ov
         {name: np.asarray([float(values[name])], dtype=np.float64) for name in names},
         "meta_id",
         ctx=ctx,
+    )
+
+
+def write_cell_nodes_dynamic(uri: str, rows, cell_count: int, *, ctx=None, overwrite: bool = True):
+    """CFD-only writer with topology width derived from the source mesh.
+
+    H5 keeps its frozen 16-slot writer above.  The repository discovers the
+    actual attributes at read time, so legacy CFD FEPolyhedron cells are not
+    silently truncated.
+    """
+    width = max(1, max((len(r) for r in rows), default=0))
+    matrix = np.full((cell_count, width), -1, dtype=np.int32)
+    for cid, row in enumerate(rows):
+        vals = np.asarray(row, dtype=np.int64).reshape(-1)
+        if vals.size:
+            matrix[cid, : vals.size] = vals.astype(np.int32)
+    ensure_parent(uri)
+    schema.create_dense_array(
+        uri, schema.schema_cell_nodes(cell_count, max_nodes=width, ctx=ctx), overwrite=overwrite, ctx=ctx
+    )
+    schema.write_dense_by_id(
+        uri, {f"node_id_{i}": matrix[:, i] for i in range(width)}, "cell_id", ctx=ctx
+    )
+
+
+def write_cell_adjacency_dynamic(uri: str, rows, cell_count: int, *, ctx=None, overwrite: bool = True):
+    width = max(1, max((len(r) for r in rows), default=0))
+    matrix = np.full((cell_count, width), -1, dtype=np.int32)
+    for cid, row in enumerate(rows):
+        vals = np.asarray(row, dtype=np.int64).reshape(-1)
+        if vals.size:
+            matrix[cid, : vals.size] = vals.astype(np.int32)
+    ensure_parent(uri)
+    schema.create_dense_array(
+        uri, schema.schema_cell_adjacency(cell_count, max_neighbors=width, ctx=ctx), overwrite=overwrite, ctx=ctx
+    )
+    schema.write_dense_by_id(
+        uri, {f"neighbor_id_{i}": matrix[:, i] for i in range(width)}, "cell_id", ctx=ctx
     )

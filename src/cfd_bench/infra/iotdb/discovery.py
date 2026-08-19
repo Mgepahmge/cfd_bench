@@ -30,18 +30,29 @@ def discover_iotdb_datasets(
             key = str(dataset)
             try:
                 meta = repo.h5_dataset_metadata(key)
-                if not meta.get("is_h5"):
-                    continue
-                steps = tuple(repo.h5_frame_timesteps(key))
-                variables = tuple(str(v).upper() for v in meta.get("common_variables", ()))
-                out.append(
-                    IoTDBDatasetInfo(
-                        dataset_key=key,
-                        zone_type=str(meta.get("zone") or "0_Fluid"),
-                        timesteps=steps,
-                        variables=variables,
+                if meta.get("is_h5"):
+                    steps = tuple(repo.h5_frame_timesteps(key))
+                    variables = tuple(str(v).upper() for v in meta.get("common_variables", ()))
+                    out.append(
+                        IoTDBDatasetInfo(
+                            dataset_key=key,
+                            zone_type=str(meta.get("zone") or "0_Fluid"),
+                            timesteps=steps,
+                            variables=variables,
+                        )
                     )
-                )
+                    continue
+
+                cfd = repo.cfd_dataset_metadata(key)
+                if cfd.get("is_cfd"):
+                    out.append(
+                        IoTDBDatasetInfo(
+                            dataset_key=key,
+                            zone_type=str(cfd.get("zone") or "0_Fluid"),
+                            timesteps=tuple(int(x) for x in cfd.get("timesteps", ())),
+                            variables=tuple(str(v).upper() for v in cfd.get("variables", ())),
+                        )
+                    )
             except Exception:
                 continue
     finally:

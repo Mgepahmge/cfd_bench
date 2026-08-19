@@ -1,80 +1,104 @@
-"""Load mesh topology from DAT into IoTDB mesh_static domain."""
+"""Load canonical legacy-CFD topology into IoTDB."""
 
 from __future__ import annotations
 
 import argparse
 import os
+from typing import Mapping, Sequence
 
 import numpy as np
-import pandas as pd
 from iotdb.Session import Session
+from iotdb.utils.Field import TSDataType as T
 
 from cfd_bench.core.context import DatasetKey
 from cfd_bench.core.paths import iotdb_root
-from cfd_bench.ingest.common.topology_export import export_zone_topology
-from cfd_bench.ingest.decoder import CAE_Decoder
-from cfd_bench.ingest.iotdb.io import load_dataframe_to_iotdb
+from cfd_bench.ingest.cfd.canonical import load_cfd_topology
+from cfd_bench.ingest.iotdb.io import (
+    delete_timeseries_prefix,
+    insert_numpy_columns,
+    insert_ragged_int_rows,
+    insert_tablet_chunked,
+)
 
 
-def export_zone_to_iotdb(session: Session, dataset_key: str, zone_name: str, topo: dict):
-    zone_key = zone_name.strip().replace(" ", "_") or "Zone_0"
-    base = f"{iotdb_root()}.mesh_static.{dataset_key}.{zone_key}"
+def export_topology_payload_to_iotdb(session: Session, dataset_key: str, topo: Mapping[str, object]):
+    zone = str(topo["zone_name"])
+    base = f"{iotdb_root()}.mesh_static.{dataset_key}.{zone}"
+    delete_timeseries_prefix(session, base)
 
-    node_ids = list(range(topo["node_count"]))
-    df_nodes = pd.DataFrame(
-        {"x": topo["nodes"]["x"], "y": topo["nodes"]["y"], "z": topo["nodes"]["z"]},
-        index=node_ids,
+    node_count = int(topo["node_count"])
+    cell_count = int(topo["cell_count"])
+    max_nodes = int(max(1, topo.get("max_nodes_per_cell", 1)))
+    max_neighbors = int(max(1, topo.get("max_neighbors_per_cell", 1)))
+
+    nodes = topo["nodes"]
+    insert_numpy_columns(
+        f"{base}.nodes",
+        session,
+        np.arange(node_count, dtype=np.int64),
+        {"x": nodes["x"], "y": nodes["y"], "z": nodes["z"]},
+        [T.DOUBLE, T.DOUBLE, T.DOUBLE],
     )
-    load_dataframe_to_iotdb(f"{base}.nodes", session, df_nodes)
 
-    cell_ids = list(range(topo["cell_count"]))
-    df_cells = pd.DataFrame(
-        topo["cells"],
-        index=cell_ids,
-        columns=["cx", "cy", "cz", "xmin", "xmax", "ymin", "ymax", "zmin", "zmax", "cell_type"],
+    cell_rows = topo["cells"]
+    insert_tablet_chunked(
+        f"{base}.cells",
+        session,
+        list(range(cell_count)),
+        ["cx", "cy", "cz", "xmin", "xmax", "ymin", "ymax", "zmin", "zmax", "cell_type"],
+        [T.DOUBLE] * 9 + [T.INT32],
+        [
+            [float(x) for x in row[:9]] + [int(row[9])]
+            for row in cell_rows
+        ],
     )
-    load_dataframe_to_iotdb(f"{base}.cells", session, df_cells)
 
-    node_cols = [f"node_id_{i}" for i in range(16)]
-    df_cell_nodes = pd.DataFrame(topo["cell_nodes"], index=cell_ids, columns=node_cols)
-    load_dataframe_to_iotdb(f"{base}.cell_nodes", session, df_cell_nodes)
+    insert_ragged_int_rows(
+        f"{base}.cell_nodes", session, list(range(cell_count)), topo["cell_nodes"], "node_id", max_nodes
+    )
+    insert_ragged_int_rows(
+        f"{base}.cell_adjacency", session, list(range(cell_count)), topo["adjacency"], "neighbor_id", max_neighbors
+    )
 
-    adj_cols = [f"neighbor_id_{i}" for i in range(16)]
-    df_adj = pd.DataFrame(topo["adjacency"], index=cell_ids, columns=adj_cols)
-    load_dataframe_to_iotdb(f"{base}.cell_adjacency", session, df_adj)
-
-    if topo["face_planes"]:
-        df_face = pd.DataFrame(
-            topo["face_planes"],
-            index=np.arange(len(topo["face_planes"])),
-            columns=["cell_id", "neighbor_id", "nx", "ny", "nz", "d", "face_area", "face_cx", "face_cy", "face_cz"],
+    bf = list(topo.get("boundary_faces", ()))
+    if bf:
+        insert_tablet_chunked(
+            f"{base}.boundary_faces",
+            session,
+            list(range(len(bf))),
+            ["cell_id", "patch_code", "nx", "ny", "nz", "area", "cx", "cy", "cz"],
+            [T.INT64, T.DOUBLE, T.DOUBLE, T.DOUBLE, T.DOUBLE, T.DOUBLE, T.DOUBLE, T.DOUBLE, T.DOUBLE],
+            [
+                [int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]), float(r[6]), float(r[7]), float(r[8])]
+                for r in bf
+            ],
         )
-        load_dataframe_to_iotdb(f"{base}.face_planes", session, df_face)
-    if topo["boundary_faces"]:
-        df_bf = pd.DataFrame(
-            topo["boundary_faces"],
-            index=np.arange(len(topo["boundary_faces"])),
-            columns=["cell_id", "patch_code", "nx", "ny", "nz", "area", "cx", "cy", "cz"],
-        )
-        load_dataframe_to_iotdb(f"{base}.boundary_faces", session, df_bf)
 
     meta = topo["bbox"]
-    df_meta = pd.DataFrame(
-        [[topo["node_count"], topo["cell_count"], topo["face_count"],
-          meta["bbox_min_x"], meta["bbox_max_x"], meta["bbox_min_y"], meta["bbox_max_y"],
-          meta["bbox_min_z"], meta["bbox_max_z"]]],
-        index=[0],
-        columns=["node_count", "cell_count", "face_count", "bbox_min_x", "bbox_max_x",
-                 "bbox_min_y", "bbox_max_y", "bbox_min_z", "bbox_max_z"],
+    insert_tablet_chunked(
+        f"{base}.mesh_meta",
+        session,
+        [0],
+        [
+            "node_count", "cell_count", "face_count",
+            "bbox_min_x", "bbox_max_x", "bbox_min_y", "bbox_max_y", "bbox_min_z", "bbox_max_z",
+            "max_nodes_per_cell", "max_neighbors_per_cell",
+        ],
+        [T.INT64, T.INT64, T.INT64] + [T.DOUBLE] * 6 + [T.INT32, T.INT32],
+        [[
+            node_count, cell_count, int(topo["face_count"]),
+            float(meta["bbox_min_x"]), float(meta["bbox_max_x"]),
+            float(meta["bbox_min_y"]), float(meta["bbox_max_y"]),
+            float(meta["bbox_min_z"]), float(meta["bbox_max_z"]),
+            max_nodes, max_neighbors,
+        ]],
     )
-    load_dataframe_to_iotdb(f"{base}.mesh_meta", session, df_meta)
 
 
-def load_topology(dat_path: str, ship: str, scale: str, zone_indices=None, **session_kw):
+def load_topology(dat_path: str, ship: str, scale: str, zone_indices=None, *, topology=None, **session_kw):
     key = DatasetKey(ship=ship, scale=scale)
-    zone_indices = zone_indices or [0]
-    data = CAE_Decoder(3)
-    data.Decode_dat_file(dat_path)
+    zone_indices = list(zone_indices or [0, 1])
+    payloads = topology if topology is not None else load_cfd_topology(dat_path, zone_indices)
     session = Session(
         session_kw.get("host", "127.0.0.1"),
         session_kw.get("port", "6667"),
@@ -83,22 +107,23 @@ def load_topology(dat_path: str, ship: str, scale: str, zone_indices=None, **ses
     )
     session.open()
     try:
-        for zi in zone_indices:
-            if zi >= len(data.Zones):
-                continue
-            zone = data.Zones[zi]
-            topo = export_zone_topology(zone)
-            export_zone_to_iotdb(session, key.dataset_key, zone.Zone_name, topo)
+        for topo in payloads.values():
+            export_topology_payload_to_iotdb(session, key.dataset_key, topo)
+            print(
+                f"IoTDB topology: {key.dataset_key}/{topo['zone_name']} "
+                f"nodes={topo['node_count']} cells={topo['cell_count']} "
+                f"max_nodes={topo['max_nodes_per_cell']} max_neighbors={topo['max_neighbors_per_cell']}"
+            )
     finally:
         session.close()
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Load mesh topology from DAT into IoTDB mesh_static")
+    ap = argparse.ArgumentParser(description="Load CFD mesh topology into IoTDB")
     ap.add_argument("--dat", required=True)
     ap.add_argument("--ship_type", default="JBC")
     ap.add_argument("--scale", default="615k")
-    ap.add_argument("--zone_indices", type=int, nargs="+", default=[0])
+    ap.add_argument("--zone_indices", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", default="6667")
     ap.add_argument("--user", default="root")

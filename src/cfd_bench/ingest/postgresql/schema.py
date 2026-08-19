@@ -14,6 +14,7 @@ _SQL_FILES = (
     "03_boundary_tables.sql",
     "04_h5_metadata.sql",
     "05_benchmark_runtime.sql",
+    "06_cfd_runtime.sql",
 )
 
 

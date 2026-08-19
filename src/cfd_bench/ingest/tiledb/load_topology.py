@@ -1,96 +1,79 @@
-"""Load mesh topology from DAT into TileDB mesh_static domain."""
+"""Load canonical legacy-CFD topology into TileDB."""
 
 from __future__ import annotations
 
 import argparse
 import os
+from typing import Mapping
 
 import numpy as np
 
 from cfd_bench.core.context import DatasetKey
-from cfd_bench.ingest.common.topology_export import export_zone_topology
-from cfd_bench.ingest.decoder import CAE_Decoder
+from cfd_bench.ingest.cfd.canonical import load_cfd_topology
 from cfd_bench.ingest.tiledb import io as tiledb_io
 
 
-def export_zone_to_tiledb(root: str, dataset_key: str, zone_name: str, topo: dict, overwrite: bool = True):
-    zone_key = zone_name.strip().replace(" ", "_") or "Zone_0"
-    meta = {
-        "node_count": topo["node_count"],
-        "cell_count": topo["cell_count"],
-        "face_count": topo["face_count"],
-        **topo["bbox"],
-    }
-    tiledb_io.write_mesh_meta(
-        tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "mesh_meta"), meta, overwrite=overwrite
-    )
+def export_topology_payload_to_tiledb(
+    root: str, dataset_key: str, topo: Mapping[str, object], *, overwrite: bool = True
+):
+    zone = str(topo["zone_name"])
+    meta = {"node_count": topo["node_count"], "cell_count": topo["cell_count"], "face_count": topo["face_count"], **topo["bbox"]}
+    tiledb_io.write_mesh_meta(tiledb_io.mesh_static_uri(root, dataset_key, zone, "mesh_meta"), meta, overwrite=overwrite)
+    nodes = topo["nodes"]
     tiledb_io.write_nodes(
-        tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "nodes"),
-        topo["nodes"]["x"], topo["nodes"]["y"], topo["nodes"]["z"], overwrite=overwrite,
+        tiledb_io.mesh_static_uri(root, dataset_key, zone, "nodes"),
+        nodes["x"], nodes["y"], nodes["z"], overwrite=overwrite,
     )
-    cell_count = topo["cell_count"]
-    cells = np.array(topo["cells"], dtype=np.float64)
+    cells = np.asarray(topo["cells"], dtype=np.float64)
     tiledb_io.write_cells(
-        tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "cells"),
+        tiledb_io.mesh_static_uri(root, dataset_key, zone, "cells"),
         {
             "cx": cells[:, 0], "cy": cells[:, 1], "cz": cells[:, 2],
             "xmin": cells[:, 3], "xmax": cells[:, 4], "ymin": cells[:, 5], "ymax": cells[:, 6],
-            "zmin": cells[:, 7], "zmax": cells[:, 8], "cell_type": cells[:, 9],
+            "zmin": cells[:, 7], "zmax": cells[:, 8], "cell_type": cells[:, 9].astype(np.int32),
         },
-        cell_count, overwrite=overwrite,
+        int(topo["cell_count"]), overwrite=overwrite,
     )
-    cn = np.array(topo["cell_nodes"], dtype=np.float32)
-    tiledb_io.write_cell_nodes(
-        tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "cell_nodes"), cn, cell_count, overwrite=overwrite
+    tiledb_io.write_cell_nodes_dynamic(
+        tiledb_io.mesh_static_uri(root, dataset_key, zone, "cell_nodes"),
+        topo["cell_nodes"], int(topo["cell_count"]), overwrite=overwrite,
     )
-    adj = np.array(topo["adjacency"], dtype=np.float32)
-    tiledb_io.write_cell_adjacency(
-        tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "cell_adjacency"), adj, cell_count, overwrite=overwrite
+    tiledb_io.write_cell_adjacency_dynamic(
+        tiledb_io.mesh_static_uri(root, dataset_key, zone, "cell_adjacency"),
+        topo["adjacency"], int(topo["cell_count"]), overwrite=overwrite,
     )
-    if topo["face_planes"]:
-        fp = np.array(topo["face_planes"])
-        tiledb_io.write_face_planes(
-            tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "face_planes"),
-            {
-                "cell_id": fp[:, 0].astype(np.int32), "neighbor_id": fp[:, 1].astype(np.int32),
-                "nx": fp[:, 2], "ny": fp[:, 3], "nz": fp[:, 4], "d": fp[:, 5],
-                "face_area": fp[:, 6], "face_cx": fp[:, 7], "face_cy": fp[:, 8], "face_cz": fp[:, 9],
-            },
-            len(fp), overwrite=overwrite,
-        )
-    if topo["boundary_faces"]:
-        bf = np.array(topo["boundary_faces"])
+    bf = list(topo.get("boundary_faces", ()))
+    if bf:
+        arr = np.asarray(bf, dtype=np.float64)
         tiledb_io.write_boundary_faces(
-            tiledb_io.mesh_static_uri(root, dataset_key, zone_key, "boundary_faces"),
+            tiledb_io.mesh_static_uri(root, dataset_key, zone, "boundary_faces"),
             {
-                "cell_id": bf[:, 0].astype(np.int32), "patch_code": bf[:, 1],
-                "nx": bf[:, 2], "ny": bf[:, 3], "nz": bf[:, 4], "area": bf[:, 5],
-                "cx": bf[:, 6], "cy": bf[:, 7], "cz": bf[:, 8],
+                "cell_id": arr[:, 0].astype(np.int32), "patch_code": arr[:, 1],
+                "nx": arr[:, 2], "ny": arr[:, 3], "nz": arr[:, 4], "area": arr[:, 5],
+                "cx": arr[:, 6], "cy": arr[:, 7], "cz": arr[:, 8],
             },
-            len(bf), overwrite=overwrite,
+            len(arr), overwrite=overwrite,
         )
+    print(
+        f"TileDB topology: {dataset_key}/{zone} nodes={topo['node_count']} cells={topo['cell_count']} "
+        f"max_nodes={topo['max_nodes_per_cell']} max_neighbors={topo['max_neighbors_per_cell']}"
+    )
 
 
-def load_topology(dat_path: str, ship: str, scale: str, root: str = "TileDB_Instances", zone_indices=None, overwrite=True):
+def load_topology(dat_path: str, ship: str, scale: str, root: str = "TileDB_Instances", zone_indices=None, overwrite=True, *, topology=None):
     key = DatasetKey(ship=ship, scale=scale)
-    zone_indices = zone_indices or [0]
-    data = CAE_Decoder(3)
-    data.Decode_dat_file(dat_path)
-    for zi in zone_indices:
-        if zi >= len(data.Zones):
-            continue
-        zone = data.Zones[zi]
-        topo = export_zone_topology(zone)
-        export_zone_to_tiledb(root, key.dataset_key, zone.Zone_name, topo, overwrite=overwrite)
+    payloads = topology if topology is not None else load_cfd_topology(dat_path, list(zone_indices or [0, 1]))
+    for topo in payloads.values():
+        export_topology_payload_to_tiledb(root, key.dataset_key, topo, overwrite=overwrite)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Load mesh topology from DAT into TileDB mesh_static")
+    ap = argparse.ArgumentParser(description="Load CFD mesh topology into TileDB")
     ap.add_argument("--dat", required=True)
     ap.add_argument("--ship_type", default="JBC")
     ap.add_argument("--scale", default="615k")
     ap.add_argument("--root", default="TileDB_Instances")
-    ap.add_argument("--zone_indices", type=int, nargs="+", default=[0])
+    ap.add_argument("--zone_indices", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--overwrite", action="store_true", default=True)
     args = ap.parse_args()
     if not os.path.isfile(args.dat):

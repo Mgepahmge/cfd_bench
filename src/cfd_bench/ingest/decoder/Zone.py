@@ -1,260 +1,278 @@
-import numpy as np
-from collections import defaultdict
+from __future__ import annotations
 
-"""
-# Class Zone_3D:
-# A data structure used for storing a zone for a 3D model
-# The main components are as follows
-# Elements: #Elements (#: Number of)
-# Faces: #Faces
-# Nodes: #Nodes
-# ZoneType: Self-explainatory
-# Parameters:
-#   X, Y, Z: float[Nodes] arrays
-#   U, V, W, P, K, E: float[Elements] arrays
-"""
+import re
+from collections import defaultdict
+from typing import Dict, List, Sequence, Tuple
+
+import numpy as np
+
 
 class Zone_3D:
-    def __init__(self, raw_content, var_count, dim, variables):
-        self.Zone_name = ''
-        self.Zone_type = ''
-        self.Element_count = ''
-        self.Face_count = ''
-        self.Node_count = ''
-        self.Variables = ''
-        self.Node_Coordinates = []
-        self.Element_Variables = []
-        self.Element_Coordinates = []
-        self.NCPF = []
-        self.FN = []
-        self.LE = []
-        self.RE = []
-        self.EN = []
-        self.DIMENSION = -1
-        self.EF = []
-        self.DIMENSION = dim
-        self.Variables = variables
-        # Construting the line of DT=(...)
-        splitter_DT = 'DT=('
-        for i in range(0, var_count):
-            splitter_DT += 'DOUBLE'
-            if i < var_count - 1:
-                splitter_DT += ' '
-        splitter_DT += ')'
-        
-        sections = raw_content.split(splitter_DT)
-        _vars = sections[1]
-        
-        # Extracting header
-        _header = sections[0]
-        # Extracting Zone name
-        lines = _header.split('\n')
-        self.Zone_name = lines[0].replace('"', '')
-        # Extracting Node, Element, Face counts & Zonetype
-        for line in lines:
-            if line.strip().startswith('Nodes'):
-                line = line.replace(' ', '')
-                parts = line.split(',')
-                for part in parts:
-                    pairs = part.split('=')
-                    if pairs[0] == 'Nodes':
-                        self.Node_count = int(pairs[1])
-                    elif pairs[0] == 'Elements':
-                        self.Element_count = int(pairs[1])
-                    elif pairs[0] == 'Faces':
-                        self.Face_count = int(pairs[1])
-                    else:
-                        self.Zone_type = pairs[1]
-                        
-        # Extracting parameter values
-        
-        vals_components = _vars.split("#")
-          
-        DT = vals_components[0]
-        
-        node_count_per_face = []
-        face_nodes = []
-        left_elements = []
-        right_elements = []
+    """Tecplot FE zone used by the legacy CFD ingest path.
 
-        for i in range(1, len(vals_components)):
-            component = vals_components[i]
-            if component.startswith(' node count per face'):
-                node_count_per_face = component
-            elif component.startswith(' face nodes'):
-                face_nodes = component
-            elif component.startswith(' left elements'):
-                left_elements = component
-            elif component.startswith(' right elements'):
-                right_elements = component
+    The original project assumed one very specific text layout and an
+    eight-node hexahedral mesh.  Real Tecplot FEPolyhedron files are less
+    rigid: whitespace varies, cells may have a different number of nodes and
+    boundary faces are represented by a zero left/right element id.  This
+    decoder keeps the public attributes used by the rest of CFD-Bench but
+    validates and normalises the input instead of relying on those historical
+    assumptions.
+    """
 
+    _SECTION_RE = re.compile(r"(?im)^\s*#\s*([^\n\r]+)\s*$")
 
-        # Processing DT
-        DT_array = DT.replace("\n", "").replace("   ", "  ").replace("  ", " ").strip().split(" ")
-        
-        N = self.Node_count
-        E = self.Element_count
-        
-        if len(DT_array) != 3 * N + (var_count - 3) * E:
-            pass  # DT length mismatch tolerated; downstream validation may fail
+    def __init__(self, raw_content: str, var_count: int, dim: int, variables: Sequence[str], *, parse_topology: bool = True):
+        self.Zone_name = ""
+        self.Zone_type = ""
+        self.Element_count = 0
+        self.Face_count = 0
+        self.Node_count = 0
+        self.Variables = list(variables)
+        self.Node_Coordinates: List[np.ndarray] = []
+        self.Element_Variables: List[np.ndarray] = []
+        self.Element_Coordinates: List[np.ndarray] = []
+        self.NCPF = np.zeros((0,), dtype=np.int64)
+        self.FN: List[np.ndarray] = []
+        self.LE = np.zeros((0,), dtype=np.int64)
+        self.RE = np.zeros((0,), dtype=np.int64)
+        self.EN: Dict[int, np.ndarray] = {}
+        self.EF: Dict[int, np.ndarray] = {}
+        self.DIMENSION = int(dim)
 
-        N = self.Node_count
-        E = self.Element_count
-        F = self.Face_count
+        header, payload = self._split_header_payload(raw_content)
+        self._parse_header(header)
+        self._parse_values(payload, int(var_count))
+        if parse_topology:
+            self._parse_topology(payload)
+            self.EN, self.EF = self.construct_element_face_and_nodes()
+            self.decode_element_centroids_using_element_nodes()
 
-        visited_element = 0
-        for vi in range(0, var_count):
-            if vi < 3:
-                tmp_var_txt = DT_array[visited_element : visited_element + N]
-                visited_element += N
-                tmp_var_double = np.zeros(N, dtype=np.float64)
-                for j in range(0, N):
-                    tmp_var_double[j] = np.float64(tmp_var_txt[j])
-                self.Node_Coordinates.append(tmp_var_double)
-            else:
-                tmp_var_txt = DT_array[visited_element : visited_element + E]
-                visited_element += E
-                tmp_var_double = np.zeros(E, dtype=np.float64)
-                for j in range(0, E):
-                    tmp_var_double[j] = np.float64(tmp_var_txt[j])
-                self.Element_Variables.append(tmp_var_double)
-        if len(node_count_per_face) > 0:
-            self.NCPF = np.array(self.decode_regular_part(node_count_per_face, self.Face_count, 0))
+    # ------------------------------------------------------------------
+    # parsing
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _split_header_payload(raw_content: str) -> Tuple[str, str]:
+        # DT may contain FLOAT/DOUBLE and arbitrary whitespace.  It marks the
+        # beginning of the block-packed numeric payload.
+        m = re.search(r"(?is)\bDT\s*=\s*\([^)]*\)", raw_content)
+        if not m:
+            raise ValueError("Tecplot zone is missing DT=(...) declaration")
+        return raw_content[: m.start()], raw_content[m.end() :]
+
+    @staticmethod
+    def _first_int(header: str, patterns: Sequence[str], field: str) -> int:
+        for pattern in patterns:
+            m = re.search(pattern, header, flags=re.IGNORECASE | re.MULTILINE)
+            if m:
+                return int(m.group(1))
+        raise ValueError(f"Tecplot zone is missing {field} count")
+
+    def _parse_header(self, header: str) -> None:
+        # The zone block starts immediately after ``ZONE T=``.  The first
+        # quoted value is therefore the zone title.
+        m = re.search(r'^\s*"([^"]+)"', header)
+        if m:
+            self.Zone_name = m.group(1).strip()
         else:
-            # If node_count_per_face is not specified, then we are probably dealing with a polygon, e.g. 2-D mesh, where faces become lines and elements become faces. 
-            # Therefore, the ncpf is bound to be 2, representing the two ends of a line
-            self.NCPF = np.full(self.Face_count, 2)
+            first = header.strip().splitlines()[0] if header.strip() else "Zone_0"
+            self.Zone_name = first.strip().strip('"') or "Zone_0"
 
-        face_nodes_array = np.array(self.decode_regular_part(face_nodes, -1, -1))
-        self.FN = self.decode_face_node_array(face_nodes_array, self.Face_count)
-        self.LE = np.array(self.decode_regular_part(left_elements, self.Face_count, -1))
-        self.RE = np.array(self.decode_regular_part(right_elements, self.Face_count, -1))
-        self.EN, self.EF = self.construct_element_face_and_nodes()
-        self.decode_element_centroids_using_element_nodes()
+        # Support both compact Tecplot aliases (N/E/F) and verbose
+        # Nodes/Elements/Faces.  Prefer verbose forms when both are present.
+        self.Node_count = self._first_int(
+            header,
+            [r"\bNodes\s*=\s*(\d+)", r"(?:^|[,\s])N\s*=\s*(\d+)"],
+            "node",
+        )
+        self.Element_count = self._first_int(
+            header,
+            [r"\bElements\s*=\s*(\d+)", r"(?:^|[,\s])E\s*=\s*(\d+)"],
+            "element",
+        )
+        self.Face_count = self._first_int(
+            header,
+            [r"\bFaces\s*=\s*(\d+)", r"(?:^|[,\s])F\s*=\s*(\d+)"],
+            "face",
+        )
+        zt = re.search(r"\bZONETYPE\s*=\s*([A-Za-z0-9_]+)", header, flags=re.IGNORECASE)
+        self.Zone_type = zt.group(1) if zt else "FEPolyhedron"
 
+        if self.Node_count <= 0 or self.Element_count <= 0:
+            raise ValueError(
+                f"invalid zone counts for {self.Zone_name!r}: "
+                f"nodes={self.Node_count} elements={self.Element_count}"
+            )
+
+    def _parse_values(self, payload: str, var_count: int) -> None:
+        numeric_text = payload.split("#", 1)[0]
+        values = np.fromstring(numeric_text, dtype=np.float64, sep=" ")
+        nodal_vars = min(self.DIMENSION, var_count)
+        expected = nodal_vars * self.Node_count + max(0, var_count - nodal_vars) * self.Element_count
+        if values.size < expected:
+            raise ValueError(
+                f"zone {self.Zone_name!r}: numeric block too short: "
+                f"expected at least {expected} values, got {values.size}"
+            )
+        # Ignore any trailing numeric tokens before the first comment only if
+        # present; normal Tecplot files have an exact match.  An exact slicing
+        # boundary prevents topology integers from leaking into field values.
+        values = values[:expected]
+        pos = 0
+        for vi in range(var_count):
+            count = self.Node_count if vi < nodal_vars else self.Element_count
+            arr = np.ascontiguousarray(values[pos : pos + count], dtype=np.float64)
+            pos += count
+            if vi < nodal_vars:
+                self.Node_Coordinates.append(arr)
+            else:
+                self.Element_Variables.append(arr)
+
+        if len(self.Node_Coordinates) < 3:
+            raise ValueError(f"zone {self.Zone_name!r}: expected X/Y/Z nodal coordinates")
+
+    @classmethod
+    def _named_sections(cls, payload: str) -> Dict[str, str]:
+        matches = list(cls._SECTION_RE.finditer(payload))
+        out: Dict[str, str] = {}
+        for i, match in enumerate(matches):
+            label = re.sub(r"\s+", " ", match.group(1).strip().lower())
+            start = match.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(payload)
+            out[label] = payload[start:end]
+        return out
+
+    @staticmethod
+    def _ints(text: str, *, offset: int = 0) -> np.ndarray:
+        vals = np.fromstring(text, dtype=np.int64, sep=" ")
+        if offset:
+            vals = vals + int(offset)
+        return vals
+
+    def _parse_topology(self, payload: str) -> None:
+        sections = self._named_sections(payload)
+
+        def section(*names: str) -> str:
+            for name in names:
+                key = re.sub(r"\s+", " ", name.strip().lower())
+                if key in sections:
+                    return sections[key]
+            return ""
+
+        ncpf_text = section("node count per face", "node counts per face")
+        if ncpf_text:
+            ncpf = self._ints(ncpf_text)
+            if ncpf.size != self.Face_count:
+                raise ValueError(
+                    f"zone {self.Zone_name!r}: expected {self.Face_count} node-count-per-face values, "
+                    f"got {ncpf.size}"
+                )
+            self.NCPF = ncpf
+        else:
+            # Historical 2-D polygon fallback.  FEPolyhedron data should
+            # normally contain node-count-per-face explicitly.
+            self.NCPF = np.full(self.Face_count, 2, dtype=np.int64)
+
+        face_nodes_text = section("face nodes", "face node")
+        left_text = section("left elements", "left element")
+        right_text = section("right elements", "right element")
+        if self.Face_count and (not face_nodes_text or not left_text or not right_text):
+            raise ValueError(
+                f"zone {self.Zone_name!r}: incomplete face topology; required sections are "
+                "# node count per face, # face nodes, # left elements, # right elements"
+            )
+
+        # Tecplot connectivity is one-based.  Element id 0 denotes the
+        # exterior boundary, hence offset -1 maps it to our -1 sentinel.
+        face_nodes = self._ints(face_nodes_text, offset=-1)
+        expected_face_nodes = int(np.sum(self.NCPF, dtype=np.int64))
+        if face_nodes.size != expected_face_nodes:
+            raise ValueError(
+                f"zone {self.Zone_name!r}: expected {expected_face_nodes} face-node ids, "
+                f"got {face_nodes.size}"
+            )
+        self.FN = self.decode_face_node_array(face_nodes, self.Face_count)
+
+        self.LE = self._ints(left_text, offset=-1)
+        self.RE = self._ints(right_text, offset=-1)
+        if self.LE.size != self.Face_count or self.RE.size != self.Face_count:
+            raise ValueError(
+                f"zone {self.Zone_name!r}: expected {self.Face_count} left/right element ids, "
+                f"got left={self.LE.size} right={self.RE.size}"
+            )
+        for name, arr in (("left", self.LE), ("right", self.RE)):
+            bad = arr[(arr < -1) | (arr >= self.Element_count)]
+            if bad.size:
+                raise ValueError(
+                    f"zone {self.Zone_name!r}: {name} element id out of range after zero-based conversion: "
+                    f"{int(bad[0])}"
+                )
+        if face_nodes.size:
+            bad_nodes = face_nodes[(face_nodes < 0) | (face_nodes >= self.Node_count)]
+            if bad_nodes.size:
+                raise ValueError(
+                    f"zone {self.Zone_name!r}: face node id out of range after zero-based conversion: "
+                    f"{int(bad_nodes[0])}"
+                )
+
+    # ------------------------------------------------------------------
+    # compatibility helpers used elsewhere in the project
+    # ------------------------------------------------------------------
     def decode_regular_part(self, array_in_text, N, offset):
-        lines = array_in_text.split("\n")[1:]
-        values_in_txt = []
-        for line in lines:
-            if len(line) == 0:
-                continue
-            tokens = line.strip().replace("   ", "  ").replace("  ", " ").split(" ")
-            values_in_txt.extend(tokens)
-        if N != -1 and len(values_in_txt) != N:
-            raise ValueError(f"expected {N} values, got {len(values_in_txt)}")
-
-        result = np.zeros(len(values_in_txt), dtype=np.int64)
-        for i in range(len(values_in_txt)):
-            result[i] = np.int64(values_in_txt[i]) + offset
-        return result
+        result = self._ints(str(array_in_text).split("\n", 1)[-1], offset=offset)
+        if N != -1 and result.size != N:
+            raise ValueError(f"expected {N} values, got {result.size}")
+        return result.tolist()
 
     def decode_face_node_array(self, face_node_array, N):
-        result = []
-        offset = 0
+        result: List[np.ndarray] = []
+        offsets = np.concatenate(([0], np.cumsum(self.NCPF, dtype=np.int64)))
+        if offsets[-1] != len(face_node_array):
+            raise ValueError(
+                f"face-node payload mismatch: expected {int(offsets[-1])}, got {len(face_node_array)}"
+            )
         for i in range(N):
-            tmp_face_node_count = self.NCPF[i]
-            result.append(face_node_array[offset : offset + tmp_face_node_count])
-            offset += tmp_face_node_count
+            result.append(np.asarray(face_node_array[offsets[i] : offsets[i + 1]], dtype=np.int64))
         return result
 
     def construct_element_face_and_nodes(self):
-        element_nodes_dict = defaultdict(set)
-        element_faces_dict = defaultdict(set)
-        
+        element_nodes = [set() for _ in range(self.Element_count)]
+        element_faces = [set() for _ in range(self.Element_count)]
         for f in range(self.Face_count):
-            face_nodes = self.FN[f]
-            # Processing left elements
-            tmp_element_id = self.LE[f]
-            
-            # Filtering unwanted element ids
-            if tmp_element_id == -1:
-                # element '-1' represents the boundary element, omit it during computation
-                continue
-            
-            # Checking if element_id has been processed
-            if tmp_element_id in element_nodes_dict:
-                tmp_element_nodes = element_nodes_dict[tmp_element_id]
-                tmp_element_faces = element_faces_dict[tmp_element_id]
-            else:
-                tmp_element_nodes = set()
-                tmp_element_faces = set()
-                
-            # Adding phase
-            tmp_element_faces.add(f)
-            for p in face_nodes:
-                tmp_element_nodes.add(p)
-                
-            element_faces_dict[tmp_element_id] = tmp_element_faces
-            element_nodes_dict[tmp_element_id] = tmp_element_nodes
-                
-
-            # Processing right elements
-            tmp_element_id = self.RE[f]
-
-            # Checking if element_id has been processed
-            if tmp_element_id in element_nodes_dict:
-                tmp_element_nodes = element_nodes_dict[tmp_element_id]
-                tmp_element_faces = element_faces_dict[tmp_element_id]
-            else:
-                tmp_element_nodes = set()
-                tmp_element_faces = set()
-                
-            # Adding phase
-            tmp_element_faces.add(f)
-            for p in face_nodes:
-                tmp_element_nodes.add(p)
-                
-            element_faces_dict[tmp_element_id] = tmp_element_faces
-            element_nodes_dict[tmp_element_id] = tmp_element_nodes
-            
-        return [element_nodes_dict, element_faces_dict]
-
+            nodes = self.FN[f]
+            for cid in (int(self.LE[f]), int(self.RE[f])):
+                if cid < 0 or cid >= self.Element_count:
+                    continue
+                element_faces[cid].add(int(f))
+                element_nodes[cid].update(int(n) for n in nodes)
+        en = {
+            cid: np.asarray(sorted(nodes), dtype=np.int64)
+            for cid, nodes in enumerate(element_nodes)
+        }
+        ef = {
+            cid: np.asarray(sorted(faces), dtype=np.int64)
+            for cid, faces in enumerate(element_faces)
+        }
+        return en, ef
 
     def decode_element_centroids_using_element_nodes(self):
-        
-        X = self.Node_Coordinates[0]
-        Y = self.Node_Coordinates[1]
-        Z = self.Node_Coordinates[2]
-        
-        Element_X = np.zeros(self.Element_count)
-        Element_Y = np.zeros(self.Element_count)
-        Element_Z = np.zeros(self.Element_count)
-        for i in range(self.Element_count):
-            tmp_element_nodes = self.EN[i]
-            centroid = np.zeros(3)
-            for n in tmp_element_nodes:
-                centroid[0] += X[n]
-                centroid[1] += Y[n]
-                centroid[2] += Z[n]
-                
-            centroid = centroid/8
-            # for j in [0,1,2]:
-            #     centroid[j] = centroid[j]/len(tmp_element_nodes)
-            Element_X[i] = centroid[0]
-            Element_Y[i] = centroid[1]
-            Element_Z[i] = centroid[2]
-        
-        self.Element_Coordinates.append(Element_X)
-        self.Element_Coordinates.append(Element_Y)
-        self.Element_Coordinates.append(Element_Z)
-        
+        xyz = np.column_stack(self.Node_Coordinates[:3]).astype(np.float64, copy=False)
+        centers = np.empty((self.Element_count, 3), dtype=np.float64)
+        for cid in range(self.Element_count):
+            nodes = np.asarray(self.EN.get(cid, ()), dtype=np.int64)
+            if nodes.size == 0:
+                raise ValueError(f"zone {self.Zone_name!r}: element {cid} has no nodes")
+            centers[cid] = np.mean(xyz[nodes], axis=0)
+        self.Element_Coordinates = [
+            np.ascontiguousarray(centers[:, 0]),
+            np.ascontiguousarray(centers[:, 1]),
+            np.ascontiguousarray(centers[:, 2]),
+        ]
 
     def construct_element_adjacency(self):
-        dict_connectivity = {}
-        for i in range(self.Face_count):
-            tmp_LE = self.LE[i]
-            tmp_RE = self.RE[i]
-            if tmp_LE in dict_connectivity:
-                dict_connectivity[tmp_LE].append(tmp_RE)
-            else:
-                dict_connectivity[tmp_LE] = [tmp_RE]
-                
-            if tmp_RE in dict_connectivity:
-                dict_connectivity[tmp_RE].append(tmp_LE)
-            else:
-                dict_connectivity[tmp_RE] = [tmp_LE]
-         
-        connectivity_list = []
-        for i in range(self.Element_count):
-            connectivity_list.append(dict_connectivity[i])
-        return connectivity_list
+        adjacency = [set() for _ in range(self.Element_count)]
+        for le_raw, re_raw in zip(self.LE, self.RE):
+            le, re = int(le_raw), int(re_raw)
+            if 0 <= le < self.Element_count and 0 <= re < self.Element_count and le != re:
+                adjacency[le].add(re)
+                adjacency[re].add(le)
+        return [sorted(row) for row in adjacency]

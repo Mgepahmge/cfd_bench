@@ -62,6 +62,45 @@ class PGMeshBackend:
         if self.conn:
             self.conn.close()
 
+    def _load_canonical_cfd_bounds(self):
+        """Return cached cell AABBs for canonical DAT ingests, else None."""
+        if self._plane_bbox_cache is not None and len(self._plane_bbox_cache) >= 6 and self._plane_bbox_cache[5] == "cfd":
+            return self._plane_bbox_cache
+        cache_key = _plane_cache_key(self.conn, self.ship_type, self.scale, self.zone_type)
+        if cache_key is not None and cache_key in _PLANE_BBOX_CACHE:
+            cached = _PLANE_BBOX_CACHE[cache_key]
+            if len(cached) >= 6 and cached[5] == "cfd":
+                self._plane_bbox_cache = cached
+                return cached
+        cur = self.conn.cursor()
+        try:
+            try:
+                cur.execute(
+                    """SELECT cell_id,xmin,xmax,ymin,ymax,zmin,zmax FROM cell_bounds
+                       WHERE ship_type=%s AND scale=%s AND zone_type=%s ORDER BY cell_id""",
+                    (self.ship_type, self.scale, self.zone_type),
+                )
+                rows = cur.fetchall()
+            except Exception:
+                self.conn.rollback()
+                return None
+        finally:
+            cur.close()
+        if not rows:
+            return None
+        ids = np.asarray([int(r[0]) for r in rows], dtype=np.int32)
+        mins = np.asarray([[float(r[1]), float(r[3]), float(r[5])] for r in rows], dtype=np.float64)
+        maxs = np.asarray([[float(r[2]), float(r[4]), float(r[6])] for r in rows], dtype=np.float64)
+        centers = np.ascontiguousarray(0.5 * (mins + maxs), dtype=np.float64)
+        extents = np.ascontiguousarray(0.5 * (maxs - mins), dtype=np.float64)
+        cached = (ids, mins, maxs, centers, extents, "cfd")
+        self._plane_bbox_cache = cached
+        if cache_key is not None:
+            _PLANE_BBOX_CACHE[cache_key] = cached
+            while len(_PLANE_BBOX_CACHE) > _PLANE_BBOX_CACHE_LIMIT:
+                _PLANE_BBOX_CACHE.popitem(last=False)
+        return cached
+
     # ------------------------------------------------------------------
     # 1) point_query replacement
     # ------------------------------------------------------------------
@@ -139,10 +178,47 @@ class PGMeshBackend:
     # ------------------------------------------------------------------
     def vtk_line_intersection(
         self,
-        vtk_mesh,  # kept for API compatibility, not used
+        vtk_mesh,
         line_start: Sequence[float],
         line_end: Sequence[float],
     ):
+        cfd = self._load_canonical_cfd_bounds()
+        if cfd is not None:
+            ids, mins, maxs = cfd[0], cfd[1], cfd[2]
+            p0 = np.asarray(line_start, dtype=np.float64).reshape(3)
+            p1 = np.asarray(line_end, dtype=np.float64).reshape(3)
+            d = p1 - p0
+            eps = 1e-9
+            chunk = 500_000
+            hit_ids, hit_t = [], []
+            for start_idx in range(0, ids.size, chunk):
+                end_idx = min(start_idx + chunk, ids.size)
+                cmins, cmaxs = mins[start_idx:end_idx], maxs[start_idx:end_idx]
+                n = end_idx - start_idx
+                tmin = np.zeros(n, dtype=np.float64)
+                tmax = np.ones(n, dtype=np.float64)
+                valid = np.ones(n, dtype=bool)
+                for axis in range(3):
+                    if abs(float(d[axis])) < eps:
+                        valid &= (p0[axis] >= cmins[:, axis] - eps) & (p0[axis] <= cmaxs[:, axis] + eps)
+                    else:
+                        inv = 1.0 / float(d[axis])
+                        ta = (cmins[:, axis] - p0[axis]) * inv
+                        tb = (cmaxs[:, axis] - p0[axis]) * inv
+                        tmin = np.maximum(tmin, np.minimum(ta, tb))
+                        tmax = np.minimum(tmax, np.maximum(ta, tb))
+                        valid &= tmin <= tmax + eps
+                idx = np.flatnonzero(valid)
+                if idx.size:
+                    hit_ids.append(ids[start_idx:end_idx][idx])
+                    hit_t.append(tmin[idx])
+            if not hit_ids:
+                return np.zeros((0,), dtype=np.int32)
+            out_ids = hit_ids[0] if len(hit_ids) == 1 else np.concatenate(hit_ids)
+            out_t = hit_t[0] if len(hit_t) == 1 else np.concatenate(hit_t)
+            return out_ids[np.argsort(out_t, kind="stable")].astype(np.int32, copy=False)
+
+        # Frozen H5/old-DB path.
         x0, y0, z0 = map(float, line_start)
         x1, y1, z1 = map(float, line_end)
         vx, vy, vz = x1 - x0, y1 - y0, z1 - z0
@@ -151,44 +227,16 @@ class PGMeshBackend:
             cur.execute(
                 """
                 WITH ln AS (
-                    SELECT ST_SetSRID(
-                        ST_MakeLine(
-                            ST_MakePoint(%s, %s, %s),
-                            ST_MakePoint(%s, %s, %s)
-                        ),
-                        0
-                    ) AS g
+                    SELECT ST_SetSRID(ST_MakeLine(ST_MakePoint(%s,%s,%s),ST_MakePoint(%s,%s,%s)),0) AS g
                 )
-                SELECT cg.cell_id
-                FROM cell_geom_full cg
-                CROSS JOIN ln
+                SELECT cg.cell_id FROM cell_geom_full cg CROSS JOIN ln
                 WHERE cg.ship_type=%s AND cg.scale=%s AND cg.zone_type=%s
-                  AND cg.geom &&& (SELECT g FROM ln)
-                  AND ST_3DIntersects(cg.geom, (SELECT g FROM ln))
-                ORDER BY
-                    (ST_X(cg.centroid)-%s)*%s
-                    + (ST_Y(cg.centroid)-%s)*%s
-                    + (ST_Z(cg.centroid)-%s)*%s
+                  AND cg.geom &&& (SELECT g FROM ln) AND ST_3DIntersects(cg.geom,(SELECT g FROM ln))
+                ORDER BY (ST_X(cg.centroid)-%s)*%s+(ST_Y(cg.centroid)-%s)*%s+(ST_Z(cg.centroid)-%s)*%s
                 """,
-                (
-                    x0,
-                    y0,
-                    z0,
-                    x1,
-                    y1,
-                    z1,
-                    self.ship_type,
-                    self.scale,
-                    self.zone_type,
-                    x0,
-                    vx,
-                    y0,
-                    vy,
-                    z0,
-                    vz,
-                ),
+                (x0,y0,z0,x1,y1,z1,self.ship_type,self.scale,self.zone_type,x0,vx,y0,vy,z0,vz),
             )
-            return np.array([int(r[0]) for r in cur.fetchall()], dtype=np.int32)
+            return np.asarray([int(r[0]) for r in cur.fetchall()], dtype=np.int32)
         finally:
             cur.close()
 
@@ -216,6 +264,7 @@ class PGMeshBackend:
             raise ValueError("plane_norm too small")
         n = n / n_norm
 
+        self._load_canonical_cfd_bounds()
         if self._plane_bbox_cache is None:
             cache_key = _plane_cache_key(self.conn, self.ship_type, self.scale, self.zone_type)
             if cache_key is not None and cache_key in _PLANE_BBOX_CACHE:

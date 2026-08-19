@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+from cfd_bench.workloads.common.backends import is_h5_client, make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
@@ -17,18 +17,25 @@ from cfd_bench.core.observability import benchmark_progress
 from cfd_bench.workloads.common.random_geom import random_coord_range
 
 
-def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables, *, progress=False, progress_interval=5.0):
+def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables, *, max_hit_attempts=None, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
     with benchmark_progress(f"{label} W2", duration, enabled=progress, interval=progress_interval) as prog:
         while time.time() - t0 < duration:
             var = random.choice(variables)
+            attempts = 0
+            cells = np.zeros((0,), dtype=np.int32)
             while True:
                 prog.set_phase("coordinate range query")
                 lo, hi = random_coord_range(bounds)
                 cells = coord_fn(lo, hi)
-                if len(cells) > 0:
+                attempts += 1
+                if len(cells) > 0 or (max_hit_attempts is not None and attempts >= int(max_hit_attempts)):
                     break
+            if len(cells) == 0:
+                txn += 1
+                prog.transaction()
+                continue
             chunks = []
             for step in steps:
                 prog.set_phase(f"scalar query {var} step={step} ({len(cells)} cells)")
@@ -57,7 +64,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 pg._sync_timestep(int(step))
                 return pg.point_query(cells, var)
 
-            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench("PG", pg.range_query_coord, pg_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(pg) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             shared_bounds = bounds
         pg.close()
 
@@ -71,7 +78,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 iotdb.ctx.step = step
                 return iotdb.point_query(cells, var)
 
-            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(iotdb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         iotdb.close()
 
     if "tiledb" in backends:
@@ -84,7 +91,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 tiledb.ctx.step = step
                 return tiledb.point_query(cells, var)
 
-            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench("TileDB", geom.range_query_coord, tdb_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(tiledb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         tiledb.close()
 
     if "vtk" in backends:
@@ -99,7 +106,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 finally:
                     v.close()
 
-            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         vtk.close()
 
 

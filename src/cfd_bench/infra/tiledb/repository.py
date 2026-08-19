@@ -14,6 +14,7 @@ class TileDBRepository:
         self.config = config or TileDBConfig()
         self.ctx = ctx or tiledb.Ctx()
         self._h5_meta_cache: Dict[str, Dict[str, object]] = {}
+        self._cfd_meta_cache: Dict[str, Dict[str, object]] = {}
         self._h5_steps_cache: Dict[str, List[int]] = {}
         self._node_source_cache: Dict[Tuple[str, str], np.ndarray] = {}
         self._cell_source_cache: Dict[Tuple[str, str], np.ndarray] = {}
@@ -43,6 +44,9 @@ class TileDBRepository:
     def path_h5_metadata(self, dataset_key: str, leaf: str = "dataset_meta") -> str:
         return os.path.join(self._base(dataset_key), "h5_metadata", f"{leaf}.tdb")
 
+    def path_cfd_metadata(self, dataset_key: str, leaf: str = "dataset_meta") -> str:
+        return os.path.join(self._base(dataset_key), "cfd_metadata", f"{leaf}.tdb")
+
     def array_exists(self, uri: str) -> bool:
         return tiledb.array_exists(uri, ctx=self.ctx)
 
@@ -50,6 +54,22 @@ class TileDBRepository:
         if not self.array_exists(uri):
             raise FileNotFoundError(uri)
         return tiledb.open(uri, mode=mode, ctx=self.ctx)
+
+    def _prefixed_attrs(self, uri: str, prefix: str, fallback_width: int = 16) -> List[str]:
+        try:
+            with self.open_array(uri, "r") as A:
+                names = [str(a.name) for a in A.schema]
+            matched = [name for name in names if name.startswith(prefix)]
+            if matched:
+                def key(name):
+                    try:
+                        return int(name.rsplit("_", 1)[1])
+                    except Exception:
+                        return 10**9
+                return sorted(matched, key=key)
+        except Exception:
+            pass
+        return [f"{prefix}{i}" for i in range(int(fallback_width))]
 
     def probe_array(self, uri: str) -> bool:
         try:
@@ -201,7 +221,7 @@ class TileDBRepository:
         if not ids:
             return {}
         uri = self.path_mesh_static(dataset_key, zone, "cell_nodes")
-        cols = [f"node_id_{i}" for i in range(16)]
+        cols = self._prefixed_attrs(uri, "node_id_", 16)
         raw = self._read_dense_attrs_at_ids(uri, cols, ids)
         out = {}
         for cid in ids:
@@ -212,7 +232,7 @@ class TileDBRepository:
     def fetch_cell_nodes(self, dataset_key: str, zone: str) -> Dict[int, List[int]]:
         uri = self.path_mesh_static(dataset_key, zone, "cell_nodes")
         out: Dict[int, List[int]] = {}
-        node_cols = [f"node_id_{i}" for i in range(16)]
+        node_cols = self._prefixed_attrs(uri, "node_id_", 16)
 
         try:
             meta = self.fetch_mesh_meta(dataset_key, zone)
@@ -242,7 +262,7 @@ class TileDBRepository:
     def fetch_cell_adjacency(self, dataset_key: str, zone: str) -> Dict[int, List[int]]:
         uri = self.path_mesh_static(dataset_key, zone, "cell_adjacency")
         out: Dict[int, List[int]] = {}
-        adj_cols = [f"neighbor_id_{i}" for i in range(16)]
+        adj_cols = self._prefixed_attrs(uri, "neighbor_id_", 16)
 
         try:
             meta = self.fetch_mesh_meta(dataset_key, zone)
@@ -450,6 +470,47 @@ class TileDBRepository:
         out.sort(key=lambda x: -x[1])
         return out
 
+    # -------------------- legacy CFD discovery metadata --------------------
+    def cfd_dataset_metadata(self, dataset_key: str) -> Dict[str, object]:
+        if dataset_key in self._cfd_meta_cache:
+            return dict(self._cfd_meta_cache[dataset_key])
+        uri = self.path_cfd_metadata(dataset_key)
+        if not self.array_exists(uri):
+            return {}
+        with self.open_array(uri, "r") as A:
+            data = A[0]
+            def scalar(name, default=0):
+                try:
+                    arr = np.asarray(data[name]).reshape(-1)
+                    return arr[0] if arr.size else default
+                except Exception:
+                    return default
+            def m(name, default=""):
+                try:
+                    return self._meta_text(A.meta[name], default)
+                except Exception:
+                    return default
+            def csv(name, upper=False):
+                vals = tuple(x.strip() for x in m(name).split(",") if x.strip())
+                return tuple(x.upper() for x in vals) if upper else vals
+            steps = []
+            for token in csv("timesteps_csv"):
+                try:
+                    steps.append(int(token))
+                except Exception:
+                    pass
+            result = {
+                "is_cfd": not bool(int(scalar("is_h5", 0))),
+                "zone": m("zone", "0_Fluid"),
+                "zones": csv("zones_csv"),
+                "variables": csv("common_variables_csv", upper=True) or csv("variables_csv", upper=True),
+                "timesteps": tuple(sorted(set(steps))),
+                "node_count": int(scalar("node_count", 0)),
+                "cell_count": int(scalar("cell_count", 0)),
+            }
+        self._cfd_meta_cache[dataset_key] = dict(result)
+        return result
+
     # -------------------- H5 metadata / W9-W11 --------------------
     @staticmethod
     def _meta_text(value, default: str = "") -> str:
@@ -523,6 +584,7 @@ class TileDBRepository:
                         except ValueError:
                             pass
         result = sorted(set(steps))
+        self._cfd_meta_cache: Dict[str, Dict[str, object]] = {}
         self._h5_steps_cache[dataset_key] = list(result)
         return result
 
@@ -571,6 +633,8 @@ class TileDBRepository:
         with self.open_array(uri, "r") as A:
             attrs = set(self._array_attr_names(A))
             selected = [v for v in wanted if not attrs or v in attrs]
+            if not selected and not wanted:
+                selected = sorted(str(v).upper() for v in attrs)
             if not selected:
                 return {}
             try:

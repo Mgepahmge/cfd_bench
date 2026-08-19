@@ -1,33 +1,63 @@
 from __future__ import annotations
 
+import re
+from typing import List
+
 from . import Zone
 
 
 class CAE_Decoder:
-    """Decode Tecplot-style .dat files into zone structures."""
+    """Decode Tecplot ASCII FE ``.dat`` files used by the CFD benchmark.
+
+    Public attributes intentionally match the historical decoder.  Parsing is
+    whitespace-tolerant and all ZONE blocks are retained instead of silently
+    truncating after the first two.
+    """
+
+    _ZONE_RE = re.compile(r"(?im)^\s*ZONE\s+T\s*=\s*")
 
     def __init__(self, dim: int):
         self.Title = ""
-        self.Variables: list[str] = []
+        self.Variables: List[str] = []
         self.Var_count = -1
-        self.Zones: list[Zone.Zone_3D] = []
-        self.N_DIM = dim
+        self.Zones: List[Zone.Zone_3D] = []
+        self.N_DIM = int(dim)
 
-    def Decode_dat_file(self, path: str) -> None:
-        with open(path, "r", encoding="UTF-8") as fh:
+    @staticmethod
+    def _parse_variables(preamble: str) -> List[str]:
+        m = re.search(
+            r"(?is)\bVARIABLES\s*=\s*(.*?)(?=^\s*ZONE\b)",
+            preamble,
+            flags=re.MULTILINE,
+        )
+        text = m.group(1) if m else ""
+        quoted = re.findall(r'"([^"]+)"', text)
+        if quoted:
+            return [x.strip() for x in quoted if x.strip()]
+        # Fallback for unquoted/simple files.
+        return [x for x in re.split(r"[\s,]+", text.strip()) if x]
+
+    def Decode_dat_file(self, path: str, *, topology: bool = True) -> None:
+        with open(path, "r", encoding="UTF-8", errors="replace") as fh:
             raw_content = fh.read()
 
-        paragraphs = raw_content.split("ZONE  T=")
-        for line in paragraphs[0].split("\n"):
-            line = line.strip()
-            if line.startswith("TITLE"):
-                self.Title = line.split("=", 1)[1].replace('"', "").strip()
-            elif line.startswith("VARIABLES"):
-                tokens = line.split("=", 1)[1].replace('"', "").split()
-                self.Variables = [v for v in tokens if v]
-                self.Var_count = len(self.Variables)
+        zone_matches = list(self._ZONE_RE.finditer(raw_content))
+        preamble = raw_content[: zone_matches[0].start()] if zone_matches else raw_content
 
-        # Fluid + hull zones (first two ZONE blocks).
-        for i in range(1, min(len(paragraphs), 3)):
-            zone = Zone.Zone_3D(paragraphs[i], self.Var_count, self.N_DIM, self.Variables)
-            self.Zones.append(zone)
+        title = re.search(r'(?im)^\s*TITLE\s*=\s*"?([^"\n\r]+)"?', preamble)
+        self.Title = title.group(1).strip() if title else ""
+        self.Variables = self._parse_variables(raw_content if zone_matches else preamble)
+        self.Var_count = len(self.Variables)
+        if self.Var_count < self.N_DIM:
+            raise ValueError(
+                f"DAT file {path!r} declares only {self.Var_count} variables; expected at least {self.N_DIM}"
+            )
+        if not zone_matches:
+            raise ValueError(f"DAT file {path!r} contains no ZONE blocks")
+
+        self.Zones = []
+        for i, match in enumerate(zone_matches):
+            start = match.end()
+            end = zone_matches[i + 1].start() if i + 1 < len(zone_matches) else len(raw_content)
+            block = raw_content[start:end]
+            self.Zones.append(Zone.Zone_3D(block, self.Var_count, self.N_DIM, self.Variables, parse_topology=topology))

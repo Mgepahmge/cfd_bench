@@ -70,6 +70,8 @@ def mesh_bounds_from_client(client) -> Optional[list]:
     if hasattr(client, "runtime") and client.runtime is not None and hasattr(client, "ctx") and client.ctx is not None:
         try:
             data = client.runtime.ensure_cells(client.ctx.dataset_key, client.ctx.zone)
+            if not data.cells:
+                return None
             from cfd_bench.workloads.common.bounds import bbox_from_cell_bboxes, flat_bounds
 
             gmin, gmax = bbox_from_cell_bboxes(data.cell_bbox)
@@ -77,6 +79,8 @@ def mesh_bounds_from_client(client) -> Optional[list]:
         except TypeError:
             try:
                 data = client.runtime.ensure_cells()
+                if not data.cells:
+                    return None
                 from cfd_bench.workloads.common.bounds import bbox_from_cell_bboxes, flat_bounds
 
                 gmin, gmax = bbox_from_cell_bboxes(data.cell_bbox)
@@ -96,3 +100,12 @@ def mesh_bounds_from_client(client) -> Optional[list]:
         b = client.vtk_mesh.GetBounds()
         return [b[0], b[1], b[2], b[3], b[4], b[5]]
     return None
+
+
+def is_h5_client(client) -> bool:
+    """Best-effort dataset-type probe used only to isolate legacy CFD fixes."""
+    try:
+        fn = getattr(client, "is_h5_dataset", None)
+        return bool(fn()) if callable(fn) else False
+    except Exception:
+        return False

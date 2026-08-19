@@ -322,6 +322,31 @@ class IoTDBMeshClient(AbstractContextManager):
         self._surface_cells_normals_cache = result
         return result
 
+    def w6_zone_candidates(
+        self, dataset_key: str, preferred_zone: Optional[str] = None, hull_hint: Optional[str] = None
+    ):
+        """Return legacy-CFD zones in physical-surface preference order."""
+        meta = self.repo.cfd_dataset_metadata(dataset_key)
+        zones = [str(z) for z in meta.get("zones", ())]
+        if not zones:
+            zones = [z for z in (hull_hint, preferred_zone) if z]
+        ordered = []
+        def add(zone):
+            if zone and zone in zones and zone not in ordered:
+                ordered.append(zone)
+        add(hull_hint)
+        for keyword in ("hull", "wall", "symmetry"):
+            for zone in zones:
+                if keyword in zone.lower():
+                    add(zone)
+        for zone in zones:
+            if "fluid" not in zone.lower():
+                add(zone)
+        add(preferred_zone)
+        for zone in zones:
+            add(zone)
+        return ordered
+
     def resolve_w6_scalar(self, candidates: Sequence[str] = ("P", "U", "V", "W", "K", "E")) -> str:
         """Choose an available cell scalar for W6, preferring pressure.
 
@@ -403,8 +428,12 @@ class IoTDBMeshClient(AbstractContextManager):
     def get_max_diffs(self, step: Optional[int] = None):
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        meta = self.repo.h5_dataset_metadata(ctx.dataset_key) if self.repo.is_h5_dataset(ctx.dataset_key) else {}
-        variables = list(meta.get("variables", ()))
+        if self.repo.is_h5_dataset(ctx.dataset_key):
+            meta = self.repo.h5_dataset_metadata(ctx.dataset_key)
+            variables = list(meta.get("variables", ()))
+        else:
+            meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
+            variables = list(meta.get("variables", ())) or ["U", "V", "W", "P", "K", "E"]
         return self.repo.fetch_max_diffs(ctx.dataset_key, ts, variables)
 
     def is_h5_dataset(self) -> bool:

@@ -301,3 +301,58 @@ def test_workload_config_can_discover_h5_metadata_from_tiledb(monkeypatch):
     assert cfg.valid_steps("beam_modal") == [0, 1, 2]
     assert cfg.valid_variables("beam_modal") == ["U", "V", "W"]
     assert cfg.fluid_zone("beam_modal") == "0_Fluid"
+
+
+def test_iotdb_repository_cfd_metadata_is_separate_from_h5(monkeypatch):
+    from cfd_bench.infra.iotdb.repository import IoTDBRepository
+    from cfd_bench.infra.iotdb.config import IoTDBConfig
+
+    repo = IoTDBRepository(IoTDBConfig())
+
+    def fake_query(sql):
+        if ".cfd_metadata.Kvlcc_351k_Small.dataset_meta" in sql:
+            return [(0, [
+                "true", "0_Fluid", "0_Fluid,0_Wall_hull",
+                "U,V,W,P,K,E", "200,400", "370195", "351864",
+            ])]
+        if ".h5_metadata.Kvlcc_351k_Small.dataset_meta" in sql:
+            raise RuntimeError("not an H5 dataset")
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(repo, "query_rows", fake_query)
+    meta = repo.cfd_dataset_metadata("Kvlcc_351k_Small")
+    assert meta == {
+        "is_cfd": True,
+        "zone": "0_Fluid",
+        "zones": ("0_Fluid", "0_Wall_hull"),
+        "variables": ("U", "V", "W", "P", "K", "E"),
+        "timesteps": (200, 400),
+        "node_count": 370195,
+        "cell_count": 351864,
+    }
+    assert repo.is_h5_dataset("Kvlcc_351k_Small") is False
+
+
+def test_iotdb_client_w3_max_diff_uses_cfd_metadata_without_sidecar(monkeypatch):
+    from cfd_bench.API.iotdb_api.client import IoTDBMeshClient
+    from cfd_bench.core.context import MeshContext
+
+    client = IoTDBMeshClient()
+    client.ctx = MeshContext(dataset_key="Kvlcc_351k_Small", step=200, zone="0_Fluid")
+    monkeypatch.setattr(client.repo, "is_h5_dataset", lambda dataset: False)
+    monkeypatch.setattr(
+        client.repo,
+        "cfd_dataset_metadata",
+        lambda dataset: {"variables": ("U", "V", "W", "P", "K", "E")},
+    )
+    seen = {}
+
+    def fake_max(dataset, step, variables):
+        seen["args"] = (dataset, step, tuple(variables))
+        return {"U": 1.25, "P": 4.5}
+
+    monkeypatch.setattr(client.repo, "fetch_max_diffs", fake_max)
+    assert client.get_max_diffs() == {"U": 1.25, "P": 4.5}
+    assert seen["args"] == (
+        "Kvlcc_351k_Small", 200, ("U", "V", "W", "P", "K", "E")
+    )

@@ -360,8 +360,12 @@ class TileDBMeshClient(AbstractContextManager):
     def get_max_diffs(self, step: Optional[int] = None):
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        meta = self.repo.h5_dataset_metadata(ctx.dataset_key) if self.repo.is_h5_dataset(ctx.dataset_key) else {}
-        variables = list(meta.get("variables", ()))
+        if self.repo.is_h5_dataset(ctx.dataset_key):
+            meta = self.repo.h5_dataset_metadata(ctx.dataset_key)
+            variables = list(meta.get("variables", ()))
+        else:
+            meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
+            variables = list(meta.get("variables", ())) or ["U", "V", "W", "P", "K", "E"]
         return self.repo.fetch_max_diffs(ctx.dataset_key, ts, variables)
 
     def is_h5_dataset(self) -> bool:

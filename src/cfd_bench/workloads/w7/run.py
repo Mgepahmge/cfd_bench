@@ -6,7 +6,9 @@ import argparse
 import random
 import time
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
+import numpy as np
+
+from cfd_bench.workloads.common.backends import is_h5_client, make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
@@ -14,19 +16,23 @@ from cfd_bench.workloads.common.random_geom import random_coord_range
 from cfd_bench.core.observability import benchmark_progress
 
 
-def _bench_db(label, coord_fn, qc_fn, bounds, duration, *, progress=False, progress_interval=5.0):
+def _bench_db(label, coord_fn, qc_fn, bounds, duration, *, max_hit_attempts=None, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
     with benchmark_progress(f"{label} W7", duration, enabled=progress, interval=progress_interval) as prog:
         while time.time() - t0 < duration:
+            attempts = 0
+            cells = np.zeros((0,), dtype=np.int32)
             while True:
                 prog.set_phase("coordinate range query")
                 lo, hi = random_coord_range(bounds)
                 cells = coord_fn(lo, hi)
-                if len(cells) > 0:
+                attempts += 1
+                if len(cells) > 0 or (max_hit_attempts is not None and attempts >= int(max_hit_attempts)):
                     break
-            prog.set_phase(f"Q-criterion ({len(cells)} ROI cells)")
-            qc_fn(lo, hi)
+            if len(cells) > 0:
+                prog.set_phase(f"Q-criterion ({len(cells)} ROI cells)")
+                qc_fn(lo, hi)
             txn += 1
             prog.transaction()
     print(f"{label} W7: {txn} txns in {duration}s")
@@ -78,6 +84,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 lambda lo, hi: pg.compute_qcriterion_roi(lo, hi),
                 bounds,
                 cfg.duration_sec,
+                max_hit_attempts=None if is_h5_client(pg) else 16,
                 progress=cfg.progress,
                 progress_interval=cfg.progress_interval_sec,
             )
@@ -95,6 +102,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 lambda lo, hi: iotdb.compute_qcriterion_roi(lo, hi),
                 bounds,
                 cfg.duration_sec,
+                max_hit_attempts=None if is_h5_client(iotdb) else 16,
                 progress=cfg.progress,
                 progress_interval=cfg.progress_interval_sec,
             )
@@ -111,6 +119,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 lambda lo, hi: tiledb.compute_qcriterion_roi(lo, hi),
                 bounds,
                 cfg.duration_sec,
+                max_hit_attempts=None if is_h5_client(tiledb) else 16,
                 progress=cfg.progress,
                 progress_interval=cfg.progress_interval_sec,
             )

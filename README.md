@@ -73,7 +73,27 @@ export CFD_BENCH_DATA_ROOT=/path/to/your/data   # default: ~/data or /data if pr
 | `vtk_dir/` | VTK fluid-zone files (for `--geom-engine vtk`) |
 | `vtk_hull_dir/` | VTK hull-zone files |
 | `TileDB_Instances/` | TileDB array root |
-| `Max_Range/` | Precomputed variable min/max |
+| `Max_Range/` | Compatibility sidecars for pre-v14 legacy CFD databases |
+
+## Legacy CFD DAT path (v14 canonical ingest)
+
+The legacy Tecplot CFD path was rebuilt in v14 around a backend-neutral canonical mesh contract. The decoder accepts the NaViiX/Tecplot `FEPolyhedron` layout used by the benchmark (`N/E`, verbose `Nodes/Faces/Elements`, `DATAPACKING=BLOCK`, cell-centred U/V/W/P/K/E, face-node lists and left/right element ownership), including multiple zones such as a fluid volume plus a wall/hull surface. Cell centroids, adjacency and boundary ownership are derived once from the same topology and then written consistently to PostgreSQL, IoTDB and TileDB.
+
+**CFD datasets ingested by v13 or earlier should be re-ingested with v14.** The canonical CFD path adds/rebuilds static runtime metadata, PostgreSQL cell bounds/point buckets, backend-local W3 max-diff metadata, and dynamic-width IoTDB/TileDB connectivity. Re-ingest is deterministic and replaces stale static rows instead of preserving old `ON CONFLICT DO NOTHING` topology.
+
+**H5/structural datasets do not need to be re-ingested.** The `ingest/h5` implementation and H5 storage contract are intentionally frozen; the v14 changes are isolated to legacy DAT ingest and CFD runtime compatibility. W9-W11 remain H5-only.
+
+```bash
+# Rebuild one CFD dataset with the canonical DAT path.
+cfd-bench ingest --dat /path/to/Kvlcc_351k_Small/Postprocessing --datasets Kvlcc_351k_Small
+
+# Then run the legacy CFD workloads on any selected backend.
+cfd-bench run --datasets Kvlcc_351k_Small --backend postgresql --workloads w1 w2 w3 w4 w5 w6 w7 w8
+cfd-bench run --datasets Kvlcc_351k_Small --backend iotdb      --workloads w1 w2 w3 w4 w5 w6 w7 w8
+cfd-bench run --datasets Kvlcc_351k_Small --backend tiledb     --workloads w1 w2 w3 w4 w5 w6 w7 w8
+```
+
+For canonical CFD data, empty random point/ROI samples are bounded per transaction so W1/W2/W4/W7 always return control to the historical outer duration loop. This does **not** add a hard benchmark deadline or change the validated H5 retry behaviour. PostgreSQL point buckets cover cell AABBs rather than only cell centroids; IoTDB/TileDB store connectivity with the width required by the actual FE topology instead of truncating at 16 entries. W3 max-diff metadata is stored inside each backend and no longer depends on another backend generating a `Max_Range` sidecar.
 
 ## Data loading (`cfd-bench ingest`)
 
@@ -264,7 +284,7 @@ cfd-bench run --workloads w9 w10 w11 --datasets beam_modal --backend tiledb --du
 
 ### W3 max-diff metadata
 
-New HDF5 ingests materialize W3 search widths inside the selected backend: PostgreSQL uses `benchmark_max_diff`; IoTDB uses `derived.{dataset}.step_<n>.max_diff`; TileDB uses `derived/step_<n>/max_diff.tdb`. PostgreSQL retains its old-database recomputation fallback, while legacy CFD IoTDB/TileDB can still use Max_Range sidecars. New H5 IoTDB/TileDB workloads do not depend on a machine-specific Max_Range directory.
+New HDF5 ingests materialize W3 search widths inside the selected backend: PostgreSQL uses `benchmark_max_diff`; IoTDB uses `derived.{dataset}.step_<n>.max_diff`; TileDB uses `derived/step_<n>/max_diff.tdb`. PostgreSQL retains its old-database recomputation fallback, while pre-v14 legacy CFD IoTDB/TileDB databases can still use Max_Range sidecars as a compatibility fallback. Canonical v14 CFD ingests and H5 ingests keep W3 max-diff metadata inside the selected backend and do not depend on a machine-specific Max_Range directory.
 
 ### PostgreSQL connection settings
 

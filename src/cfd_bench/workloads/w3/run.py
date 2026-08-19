@@ -8,6 +8,8 @@ import os
 import random
 import time
 
+import numpy as np
+
 from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
@@ -41,6 +43,9 @@ def _find_max_diff_file(directory: str, ship: str, step: int):
 
 
 def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, duration, variables, *, progress=False, progress_interval=5.0):
+    if int(n_cells or 0) <= 0:
+        print(f"{label} W3: skip (no mesh cells)")
+        return
     usable = [str(v).upper() for v in variables if str(v).upper() in max_diffs]
     if not usable:
         print(f"{label} W3: skip (no variables with max-diff metadata)")
@@ -53,7 +58,16 @@ def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, d
             delta = max_diffs[var]
             cid = random.randint(0, max(0, n_cells - 1))
             prog.set_phase(f"seed scalar query {var}")
-            iso_val = float(scalar_fn([cid], var)[0])
+            seed_values = scalar_fn([cid], var)
+            if seed_values is None or len(seed_values) == 0:
+                txn += 1
+                prog.transaction()
+                continue
+            iso_val = float(seed_values[0])
+            if not np.isfinite(iso_val):
+                txn += 1
+                prog.transaction()
+                continue
             prog.set_phase(f"variable range query {var}")
             cells = range_fn(iso_val - delta, iso_val + delta, var)
             prog.set_phase(f"extract submesh ({len(cells)} cells)")

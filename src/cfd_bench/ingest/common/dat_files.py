@@ -20,11 +20,19 @@ def iter_dat_files(dat_path: str) -> List[str]:
         return [str(path)]
     if not path.is_dir():
         raise FileNotFoundError(dat_path)
-    files = sorted(
+    files = [
         str(path / name)
         for name in os.listdir(path)
         if name.lower().endswith(".dat") and (path / name).is_file()
-    )
+    ]
+    def sort_key(filename: str):
+        stem = Path(filename).stem
+        token = stem.split("_", 1)[0]
+        try:
+            return (0, int(token), stem)
+        except ValueError:
+            return (1, 0, stem)
+    files.sort(key=sort_key)
     if not files:
         raise FileNotFoundError(f"no .dat files under {dat_path}")
     return files

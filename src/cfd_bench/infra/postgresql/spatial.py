@@ -8,6 +8,115 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+
+
+_CFD_GRID_SPEC_CACHE: Dict[Tuple[int, str, str, str], Optional[Tuple[float, float, float, float, float, float, int, int, int]]] = {}
+
+
+def _cfd_grid_spec(conn, ship_type: str, scale: str, zone_type: str):
+    """Return canonical-CFD point-grid geometry, or ``None`` for frozen H5/legacy DBs.
+
+    New CFD ingests are identified by the presence of ``cell_bounds`` rows.
+    The result is cached for the lifetime of the DB connection so point-heavy
+    workloads do not re-read grid metadata for every transaction.
+    """
+    cache_key = (id(conn), str(ship_type), str(scale), str(zone_type))
+    if cache_key in _CFD_GRID_SPEC_CACHE:
+        return _CFD_GRID_SPEC_CACHE[cache_key]
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT to_regclass('public.cell_bounds')"
+        )
+        if not cur.fetchone()[0]:
+            _CFD_GRID_SPEC_CACHE[cache_key] = None
+            return None
+        cur.execute(
+            "SELECT 1 FROM cell_bounds WHERE ship_type=%s AND scale=%s AND zone_type=%s LIMIT 1",
+            (ship_type, scale, zone_type),
+        )
+        if cur.fetchone() is None:
+            _CFD_GRID_SPEC_CACHE[cache_key] = None
+            return None
+        cur.execute(
+            """
+            SELECT MIN(x_min), MIN(y_min), MIN(z_min),
+                   MIN(x_max-x_min), MIN(y_max-y_min), MIN(z_max-z_min),
+                   MAX(ix)+1, MAX(iy)+1, MAX(iz)+1
+            FROM point_locator_grid
+            WHERE ship_type=%s AND scale=%s AND zone_type=%s
+            """,
+            (ship_type, scale, zone_type),
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None or row[6] is None:
+            spec = None
+        else:
+            spec = (
+                float(row[0]), float(row[1]), float(row[2]),
+                max(float(row[3]), 1e-12), max(float(row[4]), 1e-12), max(float(row[5]), 1e-12),
+                int(row[6]), int(row[7]), int(row[8]),
+            )
+        _CFD_GRID_SPEC_CACHE[cache_key] = spec
+        return spec
+    finally:
+        cur.close()
+
+
+def _cfd_point_intersection_batch(
+    conn, ship_type: str, scale: str, zone_type: str, points: NDArray[np.float64], spec
+) -> NDArray[np.int32]:
+    """Locate canonical CFD points in one indexed SQL round-trip."""
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if pts.size == 0:
+        return np.zeros((0,), dtype=np.int32)
+    ox, oy, oz, dx, dy, dz, nx, ny, nz = spec
+    idx = np.floor((pts - np.asarray([ox, oy, oz])) / np.asarray([dx, dy, dz])).astype(np.int64)
+    idx[:, 0] = np.clip(idx[:, 0], 0, max(nx - 1, 0))
+    idx[:, 1] = np.clip(idx[:, 1], 0, max(ny - 1, 0))
+    idx[:, 2] = np.clip(idx[:, 2], 0, max(nz - 1, 0))
+    ords = list(range(len(pts)))
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            WITH pts AS (
+                SELECT * FROM unnest(
+                    %s::integer[], %s::double precision[], %s::double precision[], %s::double precision[],
+                    %s::integer[], %s::integer[], %s::integer[]
+                ) AS p(ord,x,y,z,ix,iy,iz)
+            ), candidates AS (
+                SELECT p.ord,p.x,p.y,p.z,u.cell_id
+                FROM pts p
+                JOIN point_locator_grid pg
+                  ON pg.ship_type=%s AND pg.scale=%s AND pg.zone_type=%s
+                 AND pg.ix=p.ix AND pg.iy=p.iy AND pg.iz=p.iz
+                CROSS JOIN LATERAL unnest(pg.cell_ids) AS u(cell_id)
+            )
+            SELECT DISTINCT ON (c.ord) c.ord, cb.cell_id
+            FROM candidates c
+            JOIN cell_bounds cb
+              ON cb.ship_type=%s AND cb.scale=%s AND cb.zone_type=%s AND cb.cell_id=c.cell_id
+            WHERE c.x BETWEEN cb.xmin AND cb.xmax
+              AND c.y BETWEEN cb.ymin AND cb.ymax
+              AND c.z BETWEEN cb.zmin AND cb.zmax
+            ORDER BY c.ord,
+                     ((cb.xmin+cb.xmax)*0.5-c.x)^2
+                   + ((cb.ymin+cb.ymax)*0.5-c.y)^2
+                   + ((cb.zmin+cb.zmax)*0.5-c.z)^2
+            """,
+            (
+                ords, pts[:,0].tolist(), pts[:,1].tolist(), pts[:,2].tolist(),
+                idx[:,0].astype(int).tolist(), idx[:,1].astype(int).tolist(), idx[:,2].astype(int).tolist(),
+                ship_type, scale, zone_type, ship_type, scale, zone_type,
+            ),
+        )
+        rows = cur.fetchall()
+        return np.asarray([int(cid) for _ord, cid in rows], dtype=np.int32)
+    finally:
+        cur.close()
+
+
 def _dist2(a: Sequence[float], b: Sequence[float]) -> float:
     return (float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2 + (float(a[2]) - float(b[2])) ** 2
 
@@ -120,16 +229,65 @@ def _bucket_candidates(conn, ship_type: str, scale: str, zone_type: str, point_x
 def _bucket_nearest_cell(
     conn, ship_type: str, scale: str, zone_type: str, point_xyz: Sequence[float]
 ) -> Optional[int]:
-    """Return the nearest centroid among the point-locator bucket candidates.
+    """Locate a point using the regular-grid candidates.
 
-    This keeps PostgreSQL point location database-native.  The historical
-    client downloaded the complete ``cell_centroid`` table once per client
-    merely to rank a handful of bucket candidates in Python, which is
-    prohibitively expensive on multi-million-cell meshes.
+    Canonical CFD ingests populate ``cell_bounds`` and therefore require the
+    point to lie inside a candidate AABB.  H5 datasets intentionally do not
+    populate that table and retain the frozen centroid-ranking behaviour.
     """
     x, y, z = float(point_xyz[0]), float(point_xyz[1]), float(point_xyz[2])
     cur = conn.cursor()
     try:
+        cur.execute(
+            """
+            WITH has_bounds AS (
+                SELECT EXISTS(
+                    SELECT 1 FROM cell_bounds
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s LIMIT 1
+                ) AS yes
+            ), candidates AS (
+                SELECT u.cell_id
+                FROM point_locator_grid pg
+                CROSS JOIN LATERAL unnest(pg.cell_ids) AS u(cell_id)
+                WHERE pg.ship_type=%s AND pg.scale=%s AND pg.zone_type=%s
+                  AND %s BETWEEN pg.x_min AND pg.x_max
+                  AND %s BETWEEN pg.y_min AND pg.y_max
+                  AND %s BETWEEN pg.z_min AND pg.z_max
+            )
+            SELECT cb.cell_id
+            FROM candidates c
+            JOIN cell_bounds cb
+              ON cb.ship_type=%s AND cb.scale=%s AND cb.zone_type=%s AND cb.cell_id=c.cell_id
+            CROSS JOIN has_bounds hb
+            WHERE hb.yes
+              AND %s BETWEEN cb.xmin AND cb.xmax
+              AND %s BETWEEN cb.ymin AND cb.ymax
+              AND %s BETWEEN cb.zmin AND cb.zmax
+            ORDER BY ((cb.xmin+cb.xmax)*0.5-%s)^2
+                   + ((cb.ymin+cb.ymax)*0.5-%s)^2
+                   + ((cb.zmin+cb.zmax)*0.5-%s)^2
+            LIMIT 1
+            """,
+            (
+                ship_type, scale, zone_type,
+                ship_type, scale, zone_type, x, y, z,
+                ship_type, scale, zone_type, x, y, z, x, y, z,
+            ),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row[0])
+
+        # If this dataset has canonical CFD bounds, no containing AABB is a
+        # genuine miss; do not snap particles to a nearest centroid.
+        cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM cell_bounds WHERE ship_type=%s AND scale=%s AND zone_type=%s LIMIT 1)",
+            (ship_type, scale, zone_type),
+        )
+        if bool(cur.fetchone()[0]):
+            return None
+
+        # Frozen H5/older database fallback.
         cur.execute(
             """
             SELECT cc.cell_id
@@ -142,10 +300,7 @@ def _bucket_nearest_cell(
               AND %s BETWEEN pg.x_min AND pg.x_max
               AND %s BETWEEN pg.y_min AND pg.y_max
               AND %s BETWEEN pg.z_min AND pg.z_max
-            ORDER BY
-              (cc.x-%s)*(cc.x-%s) +
-              (cc.y-%s)*(cc.y-%s) +
-              (cc.z-%s)*(cc.z-%s)
+            ORDER BY (cc.x-%s)*(cc.x-%s)+(cc.y-%s)*(cc.y-%s)+(cc.z-%s)*(cc.z-%s)
             LIMIT 1
             """,
             (ship_type, scale, zone_type, x, y, z, x, x, y, y, z, z),
@@ -154,6 +309,7 @@ def _bucket_nearest_cell(
         return None if not row else int(row[0])
     finally:
         cur.close()
+
 
 def _fetch_centroids_map(conn, ship_type: str, scale: str, zone_type: str) -> Dict[int, Tuple[float, float, float]]:
     cur = conn.cursor()
@@ -181,6 +337,14 @@ def point_intersection(
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if pts.size == 0:
         return np.array([], dtype=np.int32)
+    # Canonical CFD uses AABB-covered buckets and an indexed (ix,iy,iz)
+    # lookup.  Batch all points into one SQL call.  H5 datasets do not have
+    # ``cell_bounds`` and therefore stay on the frozen historical path below.
+    if centroids is None:
+        spec = _cfd_grid_spec(conn, ship_type, scale, zone_type)
+        if spec is not None:
+            return _cfd_point_intersection_batch(conn, ship_type, scale, zone_type, pts, spec)
+
     out: List[int] = []
     for pt in pts:
         if centroids is None:
