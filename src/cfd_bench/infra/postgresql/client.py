@@ -76,7 +76,7 @@ class PGMeshBackend:
         try:
             try:
                 cur.execute(
-                    """SELECT cell_id,xmin,xmax,ymin,ymax,zmin,zmax FROM cell_bounds
+                    """SELECT cell_id,min_x,max_x,min_y,max_y,min_z,max_z FROM cell_bounds
                        WHERE ship_type=%s AND scale=%s AND zone_type=%s ORDER BY cell_id""",
                     (self.ship_type, self.scale, self.zone_type),
                 )

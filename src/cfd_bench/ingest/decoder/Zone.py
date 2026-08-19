@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
-from typing import Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+
+ProgressFn = Optional[Callable[[str, int, int], None]]
+
+
+def _tick(progress: ProgressFn, phase: str, current: int, total: int) -> None:
+    if progress is None:
+        return
+    total = max(1, int(total))
+    current = min(max(0, int(current)), total)
+    progress(phase, current, total)
+
+
+def _stride(total: int, updates: int = 200) -> int:
+    return max(1, int(total) // max(1, int(updates)))
 
 
 class Zone_3D:
@@ -21,7 +35,16 @@ class Zone_3D:
 
     _SECTION_RE = re.compile(r"(?im)^\s*#\s*([^\n\r]+)\s*$")
 
-    def __init__(self, raw_content: str, var_count: int, dim: int, variables: Sequence[str], *, parse_topology: bool = True):
+    def __init__(
+        self,
+        raw_content: str,
+        var_count: int,
+        dim: int,
+        variables: Sequence[str],
+        *,
+        parse_topology: bool = True,
+        progress: ProgressFn = None,
+    ):
         self.Zone_name = ""
         self.Zone_type = ""
         self.Element_count = 0
@@ -38,22 +61,21 @@ class Zone_3D:
         self.EN: Dict[int, np.ndarray] = {}
         self.EF: Dict[int, np.ndarray] = {}
         self.DIMENSION = int(dim)
+        self._progress = progress
 
         header, payload = self._split_header_payload(raw_content)
         self._parse_header(header)
         self._parse_values(payload, int(var_count))
         if parse_topology:
             self._parse_topology(payload)
-            self.EN, self.EF = self.construct_element_face_and_nodes()
-            self.decode_element_centroids_using_element_nodes()
+            self.EN, self.EF = self.construct_element_face_and_nodes(progress=self._progress)
+            self.decode_element_centroids_using_element_nodes(progress=self._progress)
 
     # ------------------------------------------------------------------
     # parsing
     # ------------------------------------------------------------------
     @staticmethod
     def _split_header_payload(raw_content: str) -> Tuple[str, str]:
-        # DT may contain FLOAT/DOUBLE and arbitrary whitespace.  It marks the
-        # beginning of the block-packed numeric payload.
         m = re.search(r"(?is)\bDT\s*=\s*\([^)]*\)", raw_content)
         if not m:
             raise ValueError("Tecplot zone is missing DT=(...) declaration")
@@ -68,8 +90,6 @@ class Zone_3D:
         raise ValueError(f"Tecplot zone is missing {field} count")
 
     def _parse_header(self, header: str) -> None:
-        # The zone block starts immediately after ``ZONE T=``.  The first
-        # quoted value is therefore the zone title.
         m = re.search(r'^\s*"([^"]+)"', header)
         if m:
             self.Zone_name = m.group(1).strip()
@@ -77,8 +97,6 @@ class Zone_3D:
             first = header.strip().splitlines()[0] if header.strip() else "Zone_0"
             self.Zone_name = first.strip().strip('"') or "Zone_0"
 
-        # Support both compact Tecplot aliases (N/E/F) and verbose
-        # Nodes/Elements/Faces.  Prefer verbose forms when both are present.
         self.Node_count = self._first_int(
             header,
             [r"\bNodes\s*=\s*(\d+)", r"(?:^|[,\s])N\s*=\s*(\d+)"],
@@ -104,6 +122,7 @@ class Zone_3D:
             )
 
     def _parse_values(self, payload: str, var_count: int) -> None:
+        _tick(self._progress, "parse BLOCK values", 0, 1)
         numeric_text = payload.split("#", 1)[0]
         values = np.fromstring(numeric_text, dtype=np.float64, sep=" ")
         nodal_vars = min(self.DIMENSION, var_count)
@@ -113,9 +132,6 @@ class Zone_3D:
                 f"zone {self.Zone_name!r}: numeric block too short: "
                 f"expected at least {expected} values, got {values.size}"
             )
-        # Ignore any trailing numeric tokens before the first comment only if
-        # present; normal Tecplot files have an exact match.  An exact slicing
-        # boundary prevents topology integers from leaking into field values.
         values = values[:expected]
         pos = 0
         for vi in range(var_count):
@@ -129,6 +145,7 @@ class Zone_3D:
 
         if len(self.Node_Coordinates) < 3:
             raise ValueError(f"zone {self.Zone_name!r}: expected X/Y/Z nodal coordinates")
+        _tick(self._progress, "parse BLOCK values", 1, 1)
 
     @classmethod
     def _named_sections(cls, payload: str) -> Dict[str, str]:
@@ -149,6 +166,7 @@ class Zone_3D:
         return vals
 
     def _parse_topology(self, payload: str) -> None:
+        _tick(self._progress, "parse face sections", 0, 1)
         sections = self._named_sections(payload)
 
         def section(*names: str) -> str:
@@ -168,8 +186,6 @@ class Zone_3D:
                 )
             self.NCPF = ncpf
         else:
-            # Historical 2-D polygon fallback.  FEPolyhedron data should
-            # normally contain node-count-per-face explicitly.
             self.NCPF = np.full(self.Face_count, 2, dtype=np.int64)
 
         face_nodes_text = section("face nodes", "face node")
@@ -180,9 +196,9 @@ class Zone_3D:
                 f"zone {self.Zone_name!r}: incomplete face topology; required sections are "
                 "# node count per face, # face nodes, # left elements, # right elements"
             )
+        _tick(self._progress, "parse face sections", 1, 1)
 
-        # Tecplot connectivity is one-based.  Element id 0 denotes the
-        # exterior boundary, hence offset -1 maps it to our -1 sentinel.
+        _tick(self._progress, "decode face connectivity", 0, 1)
         face_nodes = self._ints(face_nodes_text, offset=-1)
         expected_face_nodes = int(np.sum(self.NCPF, dtype=np.int64))
         if face_nodes.size != expected_face_nodes:
@@ -190,7 +206,7 @@ class Zone_3D:
                 f"zone {self.Zone_name!r}: expected {expected_face_nodes} face-node ids, "
                 f"got {face_nodes.size}"
             )
-        self.FN = self.decode_face_node_array(face_nodes, self.Face_count)
+        self.FN = self.decode_face_node_array(face_nodes, self.Face_count, progress=self._progress)
 
         self.LE = self._ints(left_text, offset=-1)
         self.RE = self._ints(right_text, offset=-1)
@@ -213,6 +229,7 @@ class Zone_3D:
                     f"zone {self.Zone_name!r}: face node id out of range after zero-based conversion: "
                     f"{int(bad_nodes[0])}"
                 )
+        _tick(self._progress, "decode face connectivity", 1, 1)
 
     # ------------------------------------------------------------------
     # compatibility helpers used elsewhere in the project
@@ -223,20 +240,26 @@ class Zone_3D:
             raise ValueError(f"expected {N} values, got {result.size}")
         return result.tolist()
 
-    def decode_face_node_array(self, face_node_array, N):
+    def decode_face_node_array(self, face_node_array, N, *, progress: ProgressFn = None):
         result: List[np.ndarray] = []
         offsets = np.concatenate(([0], np.cumsum(self.NCPF, dtype=np.int64)))
         if offsets[-1] != len(face_node_array):
             raise ValueError(
                 f"face-node payload mismatch: expected {int(offsets[-1])}, got {len(face_node_array)}"
             )
+        stride = _stride(N)
+        _tick(progress, "split face-node rows", 0, N)
         for i in range(N):
             result.append(np.asarray(face_node_array[offsets[i] : offsets[i + 1]], dtype=np.int64))
+            if (i + 1) % stride == 0 or i + 1 == N:
+                _tick(progress, "split face-node rows", i + 1, N)
         return result
 
-    def construct_element_face_and_nodes(self):
+    def construct_element_face_and_nodes(self, *, progress: ProgressFn = None):
         element_nodes = [set() for _ in range(self.Element_count)]
         element_faces = [set() for _ in range(self.Element_count)]
+        stride = _stride(self.Face_count)
+        _tick(progress, "rebuild cell topology", 0, self.Face_count)
         for f in range(self.Face_count):
             nodes = self.FN[f]
             for cid in (int(self.LE[f]), int(self.RE[f])):
@@ -244,6 +267,8 @@ class Zone_3D:
                     continue
                 element_faces[cid].add(int(f))
                 element_nodes[cid].update(int(n) for n in nodes)
+            if (f + 1) % stride == 0 or f + 1 == self.Face_count:
+                _tick(progress, "rebuild cell topology", f + 1, self.Face_count)
         en = {
             cid: np.asarray(sorted(nodes), dtype=np.int64)
             for cid, nodes in enumerate(element_nodes)
@@ -254,25 +279,33 @@ class Zone_3D:
         }
         return en, ef
 
-    def decode_element_centroids_using_element_nodes(self):
+    def decode_element_centroids_using_element_nodes(self, *, progress: ProgressFn = None):
         xyz = np.column_stack(self.Node_Coordinates[:3]).astype(np.float64, copy=False)
         centers = np.empty((self.Element_count, 3), dtype=np.float64)
+        stride = _stride(self.Element_count)
+        _tick(progress, "compute cell centroids", 0, self.Element_count)
         for cid in range(self.Element_count):
             nodes = np.asarray(self.EN.get(cid, ()), dtype=np.int64)
             if nodes.size == 0:
                 raise ValueError(f"zone {self.Zone_name!r}: element {cid} has no nodes")
             centers[cid] = np.mean(xyz[nodes], axis=0)
+            if (cid + 1) % stride == 0 or cid + 1 == self.Element_count:
+                _tick(progress, "compute cell centroids", cid + 1, self.Element_count)
         self.Element_Coordinates = [
             np.ascontiguousarray(centers[:, 0]),
             np.ascontiguousarray(centers[:, 1]),
             np.ascontiguousarray(centers[:, 2]),
         ]
 
-    def construct_element_adjacency(self):
+    def construct_element_adjacency(self, *, progress: ProgressFn = None):
         adjacency = [set() for _ in range(self.Element_count)]
-        for le_raw, re_raw in zip(self.LE, self.RE):
+        stride = _stride(self.Face_count)
+        _tick(progress, "build cell adjacency", 0, self.Face_count)
+        for f, (le_raw, re_raw) in enumerate(zip(self.LE, self.RE)):
             le, re = int(le_raw), int(re_raw)
             if 0 <= le < self.Element_count and 0 <= re < self.Element_count and le != re:
                 adjacency[le].add(re)
                 adjacency[re].add(le)
+            if (f + 1) % stride == 0 or f + 1 == self.Face_count:
+                _tick(progress, "build cell adjacency", f + 1, self.Face_count)
         return [sorted(row) for row in adjacency]

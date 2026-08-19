@@ -10,6 +10,7 @@ import numpy as np
 from cfd_bench.ingest.common.dat_files import iter_dat_files, topology_dat_file
 from cfd_bench.ingest.common.topology_export import export_zone_topology
 from cfd_bench.ingest.decoder import CAE_Decoder
+from cfd_bench.ingest.cfd.progress import TopologyProgress
 
 
 def normalize_zone_name(name: str, index: int = 0) -> str:
@@ -39,25 +40,42 @@ class CFDFrame:
     zones: Tuple[CFDZoneFrame, ...]
 
 
-def load_cfd_topology(dat_path: str, zone_indices: Sequence[int] = (0, 1)) -> Dict[str, dict]:
+def load_cfd_topology(
+    dat_path: str,
+    zone_indices: Sequence[int] = (0, 1),
+    *,
+    show_progress: bool = False,
+) -> Dict[str, dict]:
     """Decode the static mesh once and return backend-neutral zone payloads."""
     topo_path = topology_dat_file(dat_path)
+    renderer = TopologyProgress(enabled=show_progress)
     decoder = CAE_Decoder(3)
-    decoder.Decode_dat_file(topo_path, topology=True)
-    out: Dict[str, dict] = {}
-    for zi in zone_indices:
-        if int(zi) >= len(decoder.Zones):
-            continue
-        zone = decoder.Zones[int(zi)]
-        payload = export_zone_topology(zone)
-        payload["zone_index"] = int(zi)
-        out[payload["zone_name"]] = payload
-    if not out:
-        raise ValueError(
-            f"no requested CFD zones found in {topo_path}; requested={list(zone_indices)} "
-            f"available={len(decoder.Zones)}"
+    try:
+        decoder.Decode_dat_file(
+            topo_path, topology=True, progress=renderer if show_progress else None
         )
-    return out
+        out: Dict[str, dict] = {}
+        for zi in zone_indices:
+            if int(zi) >= len(decoder.Zones):
+                continue
+            zone = decoder.Zones[int(zi)]
+            prefix = f"zone {int(zi) + 1}/{len(decoder.Zones)} {normalize_zone_name(zone.Zone_name, int(zi))}"
+            progress = None
+            if show_progress:
+                progress = lambda phase, current, total, _p=prefix: renderer(
+                    f"{_p} {phase}", current, total
+                )
+            payload = export_zone_topology(zone, progress=progress)
+            payload["zone_index"] = int(zi)
+            out[payload["zone_name"]] = payload
+        if not out:
+            raise ValueError(
+                f"no requested CFD zones found in {topo_path}; requested={list(zone_indices)} "
+                f"available={len(decoder.Zones)}"
+            )
+        return out
+    finally:
+        renderer.close()
 
 
 def _zone_variables(decoder: CAE_Decoder, zone_index: int) -> CFDZoneFrame:

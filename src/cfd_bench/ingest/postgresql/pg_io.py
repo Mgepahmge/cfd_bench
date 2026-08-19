@@ -124,7 +124,7 @@ def export_topology_payload_to_pg(
         _execute_indexed_chunks(
             cursor,
             """INSERT INTO cell_bounds
-               (ship_type,scale,zone_type,cell_id,xmin,xmax,ymin,ymax,zmin,zmax) VALUES %s""",
+               (ship_type,scale,zone_type,cell_id,min_x,max_x,min_y,max_y,min_z,max_z) VALUES %s""",
             len(cells),
             lambda cid: (ship_type, scale, zone_type, cid, *[float(x) for x in cells[cid][3:9]]),
             chunk_size=20000, page_size=10000,

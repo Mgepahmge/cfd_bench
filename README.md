@@ -81,6 +81,8 @@ The legacy Tecplot CFD path was rebuilt in v14 around a backend-neutral canonica
 
 **CFD datasets ingested by v13 or earlier should be re-ingested with v14.** The canonical CFD path adds/rebuilds static runtime metadata, PostgreSQL cell bounds/point buckets, backend-local W3 max-diff metadata, and dynamic-width IoTDB/TileDB connectivity. Re-ingest is deterministic and replaces stale static rows instead of preserving old `ON CONFLICT DO NOTHING` topology.
 
+**v14.1 PostgreSQL hotfix:** the CFD-only `cell_bounds` table uses `min_x/max_x/min_y/max_y/min_z/max_z` rather than PostgreSQL's reserved MVCC system-column names `xmin/xmax`. CFD topology parsing now shows a passive progress bar by default during `cfd-bench ingest`, and the canonical exporter reuses one node-coordinate matrix while computing all cell AABBs instead of rebuilding it once per cell. H5/structural ingest is unchanged.
+
 **H5/structural datasets do not need to be re-ingested.** The `ingest/h5` implementation and H5 storage contract are intentionally frozen; the v14 changes are isolated to legacy DAT ingest and CFD runtime compatibility. W9-W11 remain H5-only.
 
 ```bash

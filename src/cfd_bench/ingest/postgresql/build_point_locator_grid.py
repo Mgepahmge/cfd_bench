@@ -62,7 +62,7 @@ def build_point_locator_grid(
             # hungry. generate_series expands only the overlapped bucket span.
             cur.execute(
                 """
-                SELECT MIN(xmin),MAX(xmax),MIN(ymin),MAX(ymax),MIN(zmin),MAX(zmax)
+                SELECT MIN(min_x),MAX(max_x),MIN(min_y),MAX(max_y),MIN(min_z),MAX(max_z)
                 FROM cell_bounds WHERE ship_type=%s AND scale=%s AND zone_type=%s
                 """,
                 (ship_type, scale, zone_type),
@@ -78,12 +78,12 @@ def build_point_locator_grid(
                 """
                 WITH spans AS (
                     SELECT cell_id,
-                           GREATEST(0, LEAST(%s-1, FLOOR((xmin-%s)/%s)::int)) AS ix0,
-                           GREATEST(0, LEAST(%s-1, FLOOR((xmax-%s)/%s)::int)) AS ix1,
-                           GREATEST(0, LEAST(%s-1, FLOOR((ymin-%s)/%s)::int)) AS iy0,
-                           GREATEST(0, LEAST(%s-1, FLOOR((ymax-%s)/%s)::int)) AS iy1,
-                           GREATEST(0, LEAST(%s-1, FLOOR((zmin-%s)/%s)::int)) AS iz0,
-                           GREATEST(0, LEAST(%s-1, FLOOR((zmax-%s)/%s)::int)) AS iz1
+                           GREATEST(0, LEAST(%s-1, FLOOR((min_x-%s)/%s)::int)) AS ix0,
+                           GREATEST(0, LEAST(%s-1, FLOOR((max_x-%s)/%s)::int)) AS ix1,
+                           GREATEST(0, LEAST(%s-1, FLOOR((min_y-%s)/%s)::int)) AS iy0,
+                           GREATEST(0, LEAST(%s-1, FLOOR((max_y-%s)/%s)::int)) AS iy1,
+                           GREATEST(0, LEAST(%s-1, FLOOR((min_z-%s)/%s)::int)) AS iz0,
+                           GREATEST(0, LEAST(%s-1, FLOOR((max_z-%s)/%s)::int)) AS iz1
                     FROM cell_bounds
                     WHERE ship_type=%s AND scale=%s AND zone_type=%s
                 ), bucket_cells AS (

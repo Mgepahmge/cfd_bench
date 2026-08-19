@@ -97,13 +97,13 @@ def _cfd_point_intersection_batch(
             FROM candidates c
             JOIN cell_bounds cb
               ON cb.ship_type=%s AND cb.scale=%s AND cb.zone_type=%s AND cb.cell_id=c.cell_id
-            WHERE c.x BETWEEN cb.xmin AND cb.xmax
-              AND c.y BETWEEN cb.ymin AND cb.ymax
-              AND c.z BETWEEN cb.zmin AND cb.zmax
+            WHERE c.x BETWEEN cb.min_x AND cb.max_x
+              AND c.y BETWEEN cb.min_y AND cb.max_y
+              AND c.z BETWEEN cb.min_z AND cb.max_z
             ORDER BY c.ord,
-                     ((cb.xmin+cb.xmax)*0.5-c.x)^2
-                   + ((cb.ymin+cb.ymax)*0.5-c.y)^2
-                   + ((cb.zmin+cb.zmax)*0.5-c.z)^2
+                     ((cb.min_x+cb.max_x)*0.5-c.x)^2
+                   + ((cb.min_y+cb.max_y)*0.5-c.y)^2
+                   + ((cb.min_z+cb.max_z)*0.5-c.z)^2
             """,
             (
                 ords, pts[:,0].tolist(), pts[:,1].tolist(), pts[:,2].tolist(),
@@ -260,12 +260,12 @@ def _bucket_nearest_cell(
               ON cb.ship_type=%s AND cb.scale=%s AND cb.zone_type=%s AND cb.cell_id=c.cell_id
             CROSS JOIN has_bounds hb
             WHERE hb.yes
-              AND %s BETWEEN cb.xmin AND cb.xmax
-              AND %s BETWEEN cb.ymin AND cb.ymax
-              AND %s BETWEEN cb.zmin AND cb.zmax
-            ORDER BY ((cb.xmin+cb.xmax)*0.5-%s)^2
-                   + ((cb.ymin+cb.ymax)*0.5-%s)^2
-                   + ((cb.zmin+cb.zmax)*0.5-%s)^2
+              AND %s BETWEEN cb.min_x AND cb.max_x
+              AND %s BETWEEN cb.min_y AND cb.max_y
+              AND %s BETWEEN cb.min_z AND cb.max_z
+            ORDER BY ((cb.min_x+cb.max_x)*0.5-%s)^2
+                   + ((cb.min_y+cb.max_y)*0.5-%s)^2
+                   + ((cb.min_z+cb.max_z)*0.5-%s)^2
             LIMIT 1
             """,
             (

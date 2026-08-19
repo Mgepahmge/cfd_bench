@@ -136,7 +136,7 @@ def ingest_all(
         from cfd_bench.ingest.cfd.canonical import load_cfd_topology
 
         print("[ingest] parsing canonical CFD topology once ...")
-        topology = load_cfd_topology(dat_path, zone_indices)
+        topology = load_cfd_topology(dat_path, zone_indices, show_progress=True)
         print(
             "[ingest] canonical topology ready: "
             + ", ".join(

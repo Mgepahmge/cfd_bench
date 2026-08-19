@@ -183,3 +183,36 @@ def test_decoder_keeps_multiple_cfd_zones_and_surface_polygon(tmp_path: Path):
     assert len(frames) == 1
     assert [z.zone_name for z in frames[0].zones] == ["0_Fluid", "0_Wall_hull"]
     assert frames[0].zones[1].variables["P"].tolist() == [42.0]
+
+
+def test_cfd_topology_progress_reports_real_phases(tmp_path: Path, capsys):
+    _write_case(tmp_path)
+    topo = load_cfd_topology(str(tmp_path), zone_indices=(0,), show_progress=True)
+    assert topo["0_Fluid"]["cell_count"] == 2
+    out = capsys.readouterr().out
+    assert "parse BLOCK values" in out
+    assert "rebuild cell topology" in out
+    assert "compute cell bounds" in out
+    assert "build cell adjacency" in out
+
+
+def test_postgresql_cfd_bounds_avoid_system_column_names():
+    root = Path(__file__).resolve().parents[1]
+    ddl = (root / "src/cfd_bench/ingest/postgresql/sql/06_cfd_runtime.sql").read_text(encoding="utf-8")
+    assert "min_x DOUBLE PRECISION" in ddl
+    assert "max_x DOUBLE PRECISION" in ddl
+    assert "xmin DOUBLE PRECISION" not in ddl
+    assert "xmax DOUBLE PRECISION" not in ddl
+
+    # All runtime users of the CFD-only cell_bounds table must agree with the
+    # DDL.  Point-locator x_min/x_max columns are a different table and remain
+    # intentionally unchanged.
+    for rel in (
+        "src/cfd_bench/ingest/postgresql/pg_io.py",
+        "src/cfd_bench/ingest/postgresql/build_point_locator_grid.py",
+        "src/cfd_bench/infra/postgresql/client.py",
+        "src/cfd_bench/infra/postgresql/spatial.py",
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "cb.xmin" not in text
+        assert "cb.xmax" not in text
