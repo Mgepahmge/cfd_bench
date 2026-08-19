@@ -50,12 +50,18 @@ def make_pg(ship: str, step: int = 200, zone: str = "0_Fluid"):
 
 def make_vtk(vtk_dir: str, ship: str, step: int, zone: str = "0_Fluid"):
     from cfd_bench.API.vtk_api.client import VTKMeshClient
+    from cfd_bench.infra.vtk.storage import manifest_path
     from cfd_bench.workloads.common.vtk_files import list_vtk_files
 
-    files = list_vtk_files(vtk_dir)
-    path = os.path.join(vtk_dir, resolve_vtk_file(files, ship, step))
-    client = VTKMeshClient()
-    client.connect(ship, step, zone, vtk_file=path)
+    client = VTKMeshClient(root_path=vtk_dir)
+    with timed_stage("VTK", f"connect dataset={ship} step={step} zone={zone}"):
+        if manifest_path(vtk_dir, ship).is_file():
+            client.connect(ship, step, zone, root_path=vtk_dir)
+        else:
+            # Read-only compatibility for historical flat baseline files.
+            files = list_vtk_files(vtk_dir)
+            path = os.path.join(vtk_dir, resolve_vtk_file(files, ship, step))
+            client.connect(ship, step, zone, vtk_file=path, root_path=vtk_dir)
     return client
 
 

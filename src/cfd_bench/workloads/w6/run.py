@@ -274,10 +274,53 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             tiledb.close()
 
     if "vtk" in backends:
-        hull = make_vtk(cfg.vtk_hull_dir, ship, step, zone=cfg.zone_hull)
-        n_cells = cell_count(hull)
-        _bench("VTK", lambda: hull.surface_norm(), lambda c: hull.point_query(c, "P"), n_cells, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-        hull.close()
+        from cfd_bench.infra.vtk.storage import manifest_path
+
+        if manifest_path(cfg.vtk_dir, ship).is_file():
+            probe = make_vtk(cfg.vtk_dir, ship, step, zone=cfg.fluid_zone(ship))
+            try:
+                zones = probe.w6_zone_candidates(
+                    ship, preferred_zone=cfg.fluid_zone(ship), hull_hint=cfg.zone_hull
+                )
+            finally:
+                probe.close()
+            selected = None
+            last_error = None
+            candidates = ["P"] + list(cfg.valid_variables(ship))
+            for zone in zones:
+                stage("VTK W6", f"probe zone={zone}")
+                client = make_vtk(cfg.vtk_dir, ship, step, zone=zone)
+                try:
+                    n_cells = cell_count(client)
+                    if n_cells <= 0:
+                        raise RuntimeError(f"no usable mesh cells in zone={zone}")
+                    scalar_name = client.resolve_w6_scalar(candidates)
+                    selected = (client, scalar_name, n_cells)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    client.close()
+            if selected is None:
+                raise RuntimeError(
+                    f"VTK W6 could not find a usable zone/scalar for dataset={ship} "
+                    f"step={step}: {last_error}"
+                )
+            client, scalar_name, n_cells = selected
+            try:
+                _bench(
+                    "VTK", lambda: client.surface_norm(),
+                    lambda c: client.point_query(c, scalar_name),
+                    n_cells, cfg.duration_sec, progress=cfg.progress,
+                    progress_interval=cfg.progress_interval_sec,
+                )
+            finally:
+                client.close()
+        else:
+            # Historical flat baseline compatibility.
+            hull = make_vtk(cfg.vtk_hull_dir, ship, step, zone=cfg.zone_hull)
+            n_cells = cell_count(hull)
+            _bench("VTK", lambda: hull.surface_norm(), lambda c: hull.point_query(c, "P"), n_cells, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            hull.close()
 
 
 def main(ships=None):

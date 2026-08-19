@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
 
@@ -29,7 +29,7 @@ def _run_client(label, client, ship, step, duration):
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
-    unsupported = set(backends) - {"postgresql", "iotdb", "tiledb"}
+    unsupported = set(backends) - {"postgresql", "iotdb", "tiledb", "vtk"}
     if unsupported:
         raise RuntimeError(f"W10 H5 support is not implemented for: {sorted(unsupported)}")
     if "postgresql" in backends:
@@ -45,6 +45,11 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
     if "tiledb" in backends:
         _run_client(
             "TileDB", make_tiledb(ship, step, cfg.tiledb_root, cfg.fluid_zone(ship)),
+            ship, step, cfg.duration_sec,
+        )
+    if "vtk" in backends:
+        _run_client(
+            "VTK", make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship)),
             ship, step, cfg.duration_sec,
         )
 

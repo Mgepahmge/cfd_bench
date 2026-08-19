@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from cfd_bench.ingest.common.dat_files import dat_dir, iter_dat_files, topology_dat_file
 
@@ -95,10 +95,18 @@ def _ingest_tiledb(
     load_cell_vars_from_path(dat_path, ship_type, scale, tiledb_root, zone_indices=zone_indices, topology=topology)
 
 
-def _ingest_vtk(dat_path: str, ship_type: str, scale: str) -> None:
-    from cfd_bench.ingest.vtk.load_vtk import load_vtk_from_dir
+def _ingest_vtk(
+    dat_path: str,
+    dataset_key: str,
+    zone_indices: Sequence[int],
+    vtk_root: str,
+    topology,
+) -> None:
+    from cfd_bench.ingest.vtk.load_vtk import load_cfd_to_vtk
 
-    load_vtk_from_dir(dat_dir(dat_path), ship_type, scale)
+    load_cfd_to_vtk(
+        dat_path, dataset_key, root=vtk_root, zone_indices=zone_indices, topology=topology
+    )
 
 
 def ingest_all(
@@ -110,7 +118,7 @@ def ingest_all(
     tiledb_root: str,
     init_pg_schema: bool = True,
     build_pg_spatial: bool = True,
-    include_vtk: bool = False,
+    vtk_root: Optional[str] = None,
     iotdb_host: str = "127.0.0.1",
     iotdb_port: str = "6667",
     iotdb_user: str = "root",
@@ -126,13 +134,15 @@ def ingest_all(
         ship_type, scale = ship, "default"
     report = IngestReport()
     selected = _normalize_backends(backends)
-    if include_vtk and "vtk" not in selected:
-        selected.append("vtk")
+
+    if vtk_root is None:
+        from cfd_bench.core.paths import resolve_vtk_dir
+        vtk_root = resolve_vtk_dir()
 
     session_kw = dict(host=iotdb_host, port=iotdb_port, user=iotdb_user, password=iotdb_password)
 
     topology = None
-    if any(b in selected for b in ("postgresql", "iotdb", "tiledb")):
+    if any(b in selected for b in ("postgresql", "iotdb", "tiledb", "vtk")):
         from cfd_bench.ingest.cfd.canonical import load_cfd_topology
 
         print("[ingest] parsing canonical CFD topology once ...")
@@ -157,7 +167,7 @@ def ingest_all(
         ),
         "iotdb": lambda: _ingest_iotdb(dat_path, ship_type, scale, zone_indices, topology, **session_kw),
         "tiledb": lambda: _ingest_tiledb(dat_path, ship_type, scale, zone_indices, tiledb_root, topology),
-        "vtk": lambda: _ingest_vtk(dat_path, ship_type, scale),
+        "vtk": lambda: _ingest_vtk(dat_path, ship, zone_indices, vtk_root, topology),
     }
 
     for backend in selected:

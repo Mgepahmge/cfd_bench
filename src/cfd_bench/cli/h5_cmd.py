@@ -6,7 +6,7 @@ import argparse
 import json
 from typing import Dict, Optional, Tuple
 
-from cfd_bench.core.paths import resolve_max_range_dir, resolve_tiledb_root
+from cfd_bench.core.paths import resolve_max_range_dir, resolve_tiledb_root, resolve_vtk_dir
 from cfd_bench.infra.postgresql.config import PostgreSQLConfig
 from cfd_bench.ingest.h5.artifacts import write_max_diff_files
 from cfd_bench.ingest.h5.postgresql import (
@@ -70,7 +70,7 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
     ingest_ap.add_argument(
         "--backends",
         nargs="+",
-        choices=["postgresql", "iotdb", "tiledb"],
+        choices=["postgresql", "iotdb", "tiledb", "vtk"],
         default=["postgresql"],
         help="H5 target backends (default: postgresql)",
     )
@@ -126,6 +126,7 @@ def add_h5_parsers(subparsers: argparse._SubParsersAction) -> None:
     ingest_ap.add_argument("--iotdb-password", default=None, help="Override CFD_BENCH_IOTDB_PASSWORD")
     ingest_ap.add_argument("--iotdb-root-path", default=None, help="Override CFD_BENCH_IOTDB_ROOT_PATH")
     ingest_ap.add_argument("--tiledb-root", default=resolve_tiledb_root(), help="TileDB root directory")
+    ingest_ap.add_argument("--vtk-root", default=resolve_vtk_dir(), help="VTK backend root directory")
     ingest_ap.set_defaults(func=run_ingest_h5)
 
 
@@ -266,6 +267,12 @@ def run_ingest_h5(args: argparse.Namespace) -> int:
             include_empty_frames=args.include_empty_frames,
         )
         completed.append("tiledb")
+
+    if "vtk" in selected:
+        from cfd_bench.ingest.vtk.load_vtk import write_h5_plan_to_vtk
+
+        write_h5_plan_to_vtk(dataset, args.zone, args.vtk_root, plan, mesh, frames)
+        completed.append("vtk")
 
     max_files = []
     if not args.no_max_diffs:

@@ -99,17 +99,14 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
         if bounds:
 
             def vtk_scalar(cid, step):
-                v = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
-                try:
-                    return (
-                        float(v.point_query([cid], "U")[0]),
-                        float(v.point_query([cid], "V")[0]),
-                        float(v.point_query([cid], "W")[0]),
-                    )
-                finally:
-                    v.close()
+                vel = vtk.velocity_query([cid], step=step)[0]
+                return float(vel[0]), float(vel[1]), float(vel[2])
 
-            _advect("VTK", vtk_scalar, vtk.point_intersection, bounds, steps, cfg.duration_sec, max_start_attempts=None, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _advect(
+                "VTK", vtk_scalar, vtk.point_intersection, bounds, steps, cfg.duration_sec,
+                max_start_attempts=128,
+                progress=cfg.progress, progress_interval=cfg.progress_interval_sec,
+            )
         vtk.close()
 
 

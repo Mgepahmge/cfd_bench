@@ -52,7 +52,7 @@ src/cfd_bench/
     iotdb/           IoTDB topology + cell_vars
     tiledb/          TileDB topology + cell_vars
     postgresql/      PG DDL, topology/cell-vars, PostGIS ETL
-    vtk/             DAT → VTK baseline export (optional)
+    vtk/             CFD/H5 → first-class VTK backend
   workloads/         W1–W11 benchmark runners
     runner.py        Multi-workload orchestration
     common/          config, backends, geom_resolver, shared CLI
@@ -70,8 +70,8 @@ export CFD_BENCH_DATA_ROOT=/path/to/your/data   # default: ~/data or /data if pr
 
 | Path (under data root) | Purpose |
 |------------------------|---------|
-| `vtk_dir/` | VTK fluid-zone files (for `--geom-engine vtk`) |
-| `vtk_hull_dir/` | VTK hull-zone files |
+| `vtk_dir/` | VTK backend datasets (`<dataset>/manifest.json` + per-zone/frame `.vtu`) |
+| `vtk_hull_dir/` | Read-only compatibility path for pre-v16 flat VTK hull files |
 | `TileDB_Instances/` | TileDB array root |
 | `Max_Range/` | Compatibility sidecars for pre-v14 legacy CFD databases |
 
@@ -83,7 +83,7 @@ The legacy Tecplot CFD path was rebuilt in v14 around a backend-neutral canonica
 
 **v14.1 PostgreSQL hotfix:** the CFD-only `cell_bounds` table uses `min_x/max_x/min_y/max_y/min_z/max_z` rather than PostgreSQL's reserved MVCC system-column names `xmin/xmax`. CFD topology parsing now shows a passive progress bar by default during `cfd-bench ingest`, and the canonical exporter reuses one node-coordinate matrix while computing all cell AABBs instead of rebuilding it once per cell. H5/structural ingest is unchanged.
 
-**H5/structural datasets do not need to be re-ingested.** The `ingest/h5` implementation and H5 storage contract are intentionally frozen; the v14 changes are isolated to legacy DAT ingest and CFD runtime compatibility. W9-W11 remain H5-only.
+**H5/structural datasets do not need to be re-ingested for the three database backends.** Their PostgreSQL/IoTDB/TileDB storage contracts remain frozen. v15 extends W9-W11 to canonical CFD data at runtime; v16 adds a separate VTK storage backend without changing those frozen database ingests.
 
 ```bash
 # Rebuild one CFD dataset with the canonical DAT path.
@@ -119,8 +119,11 @@ cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --backends ti
 # Skip PG DDL on re-run
 cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --backends postgresql --no-init-pg-schema
 
-# Optional VTK baseline export (--geom-engine vtk)
-cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --include-vtk
+# VTK is a normal ingest backend (v16+)
+cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --backends vtk
+
+# VTK can be selected together with database backends
+cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --backends postgresql iotdb tiledb vtk
 ```
 
 **PostgreSQL**: DDL → topology → cell_vars (all `.dat` in directory) → PostGIS layers. Requires **PostgreSQL + PostGIS** and `scipy`.
@@ -129,7 +132,7 @@ cfd-bench ingest --dat /path/to/Postprocessing --datasets JBC_615k --include-vtk
 
 **TileDB**: `mesh_static` topology + `post_processing/step_{t}/cell_vars` for every `.dat` file.
 
-**VTK** (optional): exports `{ship}_GEO_{step}.vtk` and `{ship}_hull_{step}.vtk` under `vtk_dir/` / `vtk_hull_dir/`.
+**VTK**: first-class backend for both canonical CFD and H5 data. New ingests write `<vtk_dir>/<dataset>/manifest.json` plus `zones/<zone>/step_<frame>.vtu`. The manifest carries dataset type, zones, steps, variables, H5 frame metadata, source-ID semantics and W3 max-diff metadata. Pre-v16 flat `.vtk` files remain read-only compatible.
 
 Connection defaults: `cfd_bench.infra.postgresql.config.PostgreSQLConfig` (`cae_data` @ `localhost:5432`).
 
@@ -153,9 +156,9 @@ PYTHONPATH=src python -m cfd_bench.ingest.tiledb.load_cell_vars --dat_dir /path/
 | W6 | Hull surface pressure integration (normals + scalar query) |
 | W7 | ROI Q-criterion computation |
 | W8 | Variable range query (vortex / threshold cell selection) |
-| W9 | H5 element centroid coordinate range → source element IDs (PostgreSQL / IoTDB / TileDB) |
-| W10 | H5 Frame statistics: count/min/max/mean/stddev for mapped fields (PostgreSQL / IoTDB / TileDB) |
-| W11 | H5 source point IDs → per-point min/max across all Frames for a nodal field (PostgreSQL / IoTDB / TileDB) |
+| W9 | Element centroid coordinate range → H5 source IDs / CFD implicit element IDs |
+| W10 | Per-frame count/min/max/mean/stddev for available physical quantities |
+| W11 | Point IDs → min/max across frames (genuine H5 nodal fields; runtime cell→node projection for CFD) |
 
 ### W5 point-location semantics
 
@@ -171,7 +174,7 @@ PYTHONPATH=src python -m cfd_bench.ingest.tiledb.load_cell_vars --dat_dir /path/
 ```bash
 cfd-bench run --datasets JBC_615k --geom-engine db
 cfd-bench run --workloads w1 w2 --datasets JBC_615k --backend iotdb --duration 10
-cfd-bench run --datasets JBC_615k --backend vtk --geom-engine vtk
+cfd-bench run --datasets JBC_615k --backend vtk
 ```
 
 ### Single workload (developer path)
@@ -194,10 +197,9 @@ vals = client.point_query(cells, "P")
 client.close()
 ```
 
-## Known limitations
+## VTK backend (v16+)
 
-- **W6 is data-dependent**: it requires a pressure-like `P` field and a surface/hull zone suitable for force integration. Structural H5 files that do not contain those semantics are not made artificial just to run W6.
-- **VTK Q-criterion (W7)**: `VTKMeshClient.compute_qcriterion_roi` is not yet implemented.
+VTK is a normal data backend rather than an ingest side effect. It implements W1–W11 for both canonical CFD and H5 datasets, auto-discovers steps/variables/zones from its manifest, caches loaded frames and spatial locators, uses NumPy-backed field access, and derives expensive point `Velocity` only for the W7 ROI instead of persisting a whole-mesh duplicate. The historical `--geom-engine vtk` mode is retained for comparison with database data backends and for read-only compatibility with old flat VTK files.
 
 ## Raw data
 
@@ -205,7 +207,7 @@ Download CFD Lifecycle Dataset (.dat files in `postprocessing/`) before ingest:
 
 https://www.scidb.cn/en/detail?dataSetId=3553563d222d41998d7ccdd2ceff1bf9
 
-## ODB-like HDF5 result ingest (PostgreSQL / IoTDB / TileDB)
+## ODB-like HDF5 result ingest (PostgreSQL / IoTDB / TileDB / VTK)
 
 The PostgreSQL HDF5 path is metadata-driven. For the normal single-instance case, the minimal workflow is:
 
@@ -223,13 +225,17 @@ cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends io
 # TileDB only.
 cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends tiledb
 
+# VTK only.
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends vtk
+
 # Or load the same canonical H5 data to multiple backends.
-cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends postgresql iotdb tiledb
+cfd-bench ingest-h5 --h5 /path/to/result.h5 --datasets beam_static --backends postgresql iotdb tiledb vtk
 
 # Runtime metadata is auto-discovered from the selected backend.
 cfd-bench run --datasets beam_static
 cfd-bench run --datasets beam_static --backend iotdb
 cfd-bench run --datasets beam_static --backend tiledb
+cfd-bench run --datasets beam_static --backend vtk
 ```
 
 The dataset key is explicit and required via `--datasets`. `--instance`, `--steps`, `--vector-field`, `--scalar-fields`, `--map`, `--zone-fluid`, `--variables`, etc. remain available as **overrides** when the source is genuinely ambiguous; they are not required for ordinary unambiguous files. Explicit `--map` entries augment the inferred mapping instead of replacing it, so for example `--map P=S.S11` keeps automatically discovered U/V/W/E.

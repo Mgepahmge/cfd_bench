@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cfd_bench"
 version = "0.2.3"
-description = "CFD-Bench: scientific data processing benchmark for IoTDB, PostgreSQL, TileDB"
+description = "CFD-Bench: scientific data processing benchmark for PostgreSQL, IoTDB, TileDB, and VTK"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [

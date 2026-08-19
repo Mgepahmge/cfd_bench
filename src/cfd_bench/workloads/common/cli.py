@@ -134,6 +134,25 @@ def workload_config_from_args(args, datasets=None, ships=None) -> WorkloadConfig
             discovered_variables.setdefault(info.dataset_key, list(info.variables))
             discovered_zones.setdefault(info.dataset_key, info.zone_type)
 
+    needs_vtk_discovery = "vtk" in backends and (
+        explicit_steps is None
+        or explicit_variables is None
+        or explicit_zone is None
+    )
+    if needs_vtk_discovery:
+        try:
+            from cfd_bench.infra.vtk.discovery import discover_vtk_datasets
+
+            infos = discover_vtk_datasets(requested_ships, root=args.vtk_dir)
+        except Exception:
+            infos = []
+        for info in infos:
+            # VTK is additive only: frozen database backend discovery always
+            # keeps priority when several backends are benchmarked together.
+            discovered_steps.setdefault(info.dataset_key, list(info.timesteps))
+            discovered_variables.setdefault(info.dataset_key, list(info.variables))
+            discovered_zones.setdefault(info.dataset_key, info.zone_type)
+
     return WorkloadConfig(
         ships=requested_ships,
         duration_sec=args.duration,

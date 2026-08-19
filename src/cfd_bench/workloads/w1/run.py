@@ -149,7 +149,7 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def vtk_scalar(cells, var):
                     return vtk.point_query(cells, var)
 
-                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=64, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
                 _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
                 _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             vtk.close()

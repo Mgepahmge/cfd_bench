@@ -129,7 +129,13 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
         bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.fluid_zone(ship)) or shared_bounds
         if bounds:
-            _bench_vtk("VTK", vtk, bounds, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench_db(
+                "VTK", vtk.range_query_coord,
+                lambda lo, hi: vtk.compute_qcriterion_roi(lo, hi),
+                bounds, cfg.duration_sec,
+                max_hit_attempts=64,
+                progress=cfg.progress, progress_interval=cfg.progress_interval_sec,
+            )
         vtk.close()
 
 

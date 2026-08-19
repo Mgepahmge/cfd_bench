@@ -1,1 +1,1 @@
-"""VTK baseline export from DAT (optional ingest backend)."""
+"""First-class VTK backend ingest for canonical CFD and H5 datasets."""

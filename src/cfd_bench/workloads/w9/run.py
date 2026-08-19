@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb
+from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import mesh_bounds
@@ -32,7 +32,7 @@ def _bench(label, range_fn, bounds, duration):
 
 
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
-    unsupported = set(backends) - {"postgresql", "iotdb", "tiledb"}
+    unsupported = set(backends) - {"postgresql", "iotdb", "tiledb", "vtk"}
     if unsupported:
         raise RuntimeError(f"W9 H5 support is not implemented for: {sorted(unsupported)}")
     steps = cfg.valid_steps(ship)
@@ -69,6 +69,16 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
             _bench("TileDB", _element_range_fn(tiledb), bounds, cfg.duration_sec)
         finally:
             tiledb.close()
+
+    if "vtk" in backends:
+        vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
+        try:
+            bounds = mesh_bounds(cfg, ship, step, vtk, vtk, cfg.fluid_zone(ship))
+            if bounds is None:
+                raise RuntimeError(f"W9 cannot determine VTK mesh bounds for {ship}")
+            _bench("VTK", _element_range_fn(vtk), bounds, cfg.duration_sec)
+        finally:
+            vtk.close()
 
 
 def main(ships=None):

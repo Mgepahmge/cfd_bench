@@ -100,13 +100,14 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
         if bounds:
 
             def vtk_scalar(cells, var, step):
-                v = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
-                try:
-                    return v.point_query(cells, var)
-                finally:
-                    v.close()
+                return vtk.point_query(cells, var, step=step)
 
-            _bench("VTK", vtk.range_query_coord, vtk_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench(
+                "VTK", vtk.range_query_coord, vtk_scalar, bounds, steps,
+                cfg.duration_sec, cfg.valid_variables(ship),
+                max_hit_attempts=64,
+                progress=cfg.progress, progress_interval=cfg.progress_interval_sec,
+            )
         vtk.close()
 
 

@@ -164,31 +164,31 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         finally:
             tiledb.close()
 
-    max_diffs = None
     if "vtk" in backends:
-        delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
-        if delta_file is None:
-            print(f"W3: no sidecar max_diffs for {ship} step {step}; skip vtk")
-        else:
-            max_diffs = read_max_diffs(delta_file)
-
-    if "vtk" in backends and max_diffs is not None:
         vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
-        n_cells = cell_count(vtk)
-        _bench(
-            "VTK",
-            lambda c, v: vtk.point_query(c, v),
-            lambda lo, hi, v: vtk.range_query_var(lo, hi, v),
-            lambda cells: vtk.extract_submesh(cells),
-            lambda mesh, v, val: vtk.isosurface_extraction(v, val),
-            n_cells,
-            max_diffs,
-            cfg.duration_sec,
-            variables,
-            progress=cfg.progress,
-            progress_interval=cfg.progress_interval_sec,
-        )
-        vtk.close()
+        try:
+            max_diffs_vtk = vtk.get_max_diffs(step)
+            if not max_diffs_vtk:
+                # Read-only compatibility for pre-v16 flat VTK baseline files.
+                delta_file = _find_max_diff_file(cfg.max_range_dir, ship, step)
+                if delta_file is not None:
+                    max_diffs_vtk = read_max_diffs(delta_file)
+            n_cells = cell_count(vtk)
+            _bench(
+                "VTK",
+                lambda c, v: vtk.point_query(c, v),
+                lambda lo, hi, v: vtk.range_query_var(lo, hi, v),
+                lambda cells: vtk.extract_submesh(cells),
+                lambda mesh, v, val: vtk.isosurface_from_submesh(mesh, v, val),
+                n_cells,
+                max_diffs_vtk,
+                cfg.duration_sec,
+                variables,
+                progress=cfg.progress,
+                progress_interval=cfg.progress_interval_sec,
+            )
+        finally:
+            vtk.close()
 
 
 def main(ships=None):

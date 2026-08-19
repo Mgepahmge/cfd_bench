@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from cfd_bench.core.paths import resolve_tiledb_root
+from cfd_bench.core.paths import resolve_tiledb_root, resolve_vtk_dir
 from cfd_bench.ingest.orchestrator import ingest_all
 
 
@@ -26,6 +26,7 @@ def add_ingest_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     ap.add_argument("--zone-indices", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--tiledb-root", default=resolve_tiledb_root())
+    ap.add_argument("--vtk-root", default=resolve_vtk_dir(), help="VTK backend root directory")
     ap.add_argument(
         "--init-pg-schema",
         dest="init_pg_schema",
@@ -52,11 +53,6 @@ def add_ingest_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_false",
         help="Skip PostGIS spatial layer build",
     )
-    ap.add_argument(
-        "--include-vtk",
-        action="store_true",
-        help="Also export VTK baseline files to vtk_dir/ and vtk_hull_dir/",
-    )
     ap.add_argument("--iotdb-host", default="127.0.0.1")
     ap.add_argument("--iotdb-port", default="6667")
     ap.add_argument("--iotdb-user", default="root")
@@ -71,9 +67,9 @@ def run_ingest(args: argparse.Namespace) -> int:
         args.backends,
         zone_indices=args.zone_indices,
         tiledb_root=args.tiledb_root,
+        vtk_root=args.vtk_root,
         init_pg_schema=args.init_pg_schema,
         build_pg_spatial=args.build_pg_spatial,
-        include_vtk=args.include_vtk,
         iotdb_host=args.iotdb_host,
         iotdb_port=args.iotdb_port,
         iotdb_user=args.iotdb_user,
