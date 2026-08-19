@@ -4,7 +4,13 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
+from cfd_bench.core.cfd_nodal_projection import (
+    NodeCellCSR,
+    build_node_cell_csr_from_incidence,
+    point_frame_extrema_from_cell_values,
+)
 from cfd_bench.core.context import DatasetKey, MeshContext, parse_dataset_key
+from cfd_bench.core.observability import timed_stage
 from cfd_bench.core.types import LiteMesh, LitePolyData
 from cfd_bench.infra.postgresql.client import PGMeshBackend
 from cfd_bench.infra.postgresql.config import PostgreSQLConfig
@@ -27,6 +33,7 @@ class PostgreSQLMeshClient:
         self._surface_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
         self._qc_centroids_cache: Optional[Dict] = None
         self._qc_neighbors_cache: Optional[Dict] = None
+        self._cfd_node_cell_csr: Optional[NodeCellCSR] = None
 
     def _ensure_inner(self):
         if self._inner is None:
@@ -54,6 +61,7 @@ class PostgreSQLMeshClient:
         self._surface_cache = None
         self._qc_centroids_cache = None
         self._qc_neighbors_cache = None
+        self._cfd_node_cell_csr = None
 
     def connect(
         self,
@@ -69,6 +77,7 @@ class PostgreSQLMeshClient:
         self._surface_cache = None
         self._qc_centroids_cache = None
         self._qc_neighbors_cache = None
+        self._cfd_node_cell_csr = None
         self._ensure_inner()
         ctx = MeshContext(dataset_key=self._key.dataset_key, step=int(step), zone=zone)
         conn = self._inner.conn
@@ -364,6 +373,274 @@ class PostgreSQLMeshClient:
         finally:
             cur.close()
         return self.runtime.isosurface(scalar_map, float(iso_value), mesh=mesh)
+
+    # ------------------------------------------------------------------
+    # Legacy CFD-only W9-W11 primitives.  The H5 methods below are kept
+    # separate so the already-validated structural path retains its exact
+    # source-label / genuine-nodal semantics.
+    # ------------------------------------------------------------------
+    def cfd_element_ids_in_coordinate_range(
+        self, lower_bound: Sequence[float], upper_bound: Sequence[float]
+    ) -> np.ndarray:
+        """Return implicit one-based Tecplot element IDs by centroid range."""
+        self._ensure_inner()
+        key = self._key
+        lo = np.asarray(lower_bound, dtype=np.float64).reshape(3)
+        hi = np.asarray(upper_bound, dtype=np.float64).reshape(3)
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT cell_id + 1
+                FROM cell_centroid
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                  AND x BETWEEN %s AND %s
+                  AND y BETWEEN %s AND %s
+                  AND z BETWEEN %s AND %s
+                ORDER BY cell_id
+                """,
+                (
+                    key.ship, key.scale, key.zone,
+                    float(lo[0]), float(hi[0]),
+                    float(lo[1]), float(hi[1]),
+                    float(lo[2]), float(hi[2]),
+                ),
+            )
+            return np.asarray([int(row[0]) for row in cur.fetchall()], dtype=np.int64)
+        finally:
+            cur.close()
+
+    def cfd_frame_statistics(
+        self, attribute_name: Optional[str] = None, step: Optional[int] = None
+    ) -> Dict[str, Dict[str, object]]:
+        """Cell-centered statistics for one legacy CFD frame."""
+        self._ensure_inner()
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            params = [key.ship, key.scale, key.zone, ts]
+            clause = ""
+            if attribute_name is not None:
+                clause = " AND var=%s"
+                params.append(str(attribute_name).upper())
+            cur.execute(
+                f"""
+                SELECT var, COUNT(*) AS n,
+                       MIN(value) AS vmin, MAX(value) AS vmax,
+                       AVG(value) AS mean, STDDEV_POP(value) AS stddev
+                FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                  AND timestep=%s{clause}
+                GROUP BY var
+                ORDER BY var
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                suffix = (
+                    f" variable={str(attribute_name).upper()}"
+                    if attribute_name is not None
+                    else ""
+                )
+                raise ValueError(f"no CFD values for frame={ts}{suffix}")
+            return {
+                str(var).upper(): {
+                    "position": "cell",
+                    "count": int(count),
+                    "min": float(vmin),
+                    "max": float(vmax),
+                    "mean": float(mean),
+                    "stddev": float(stddev or 0.0),
+                }
+                for var, count, vmin, vmax, mean, stddev in rows
+            }
+        finally:
+            cur.close()
+
+    def cfd_variables(self) -> Tuple[str, ...]:
+        """Cell variables present in every stored CFD timestep for this zone."""
+        self._ensure_inner()
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                WITH frame_count AS (
+                    SELECT COUNT(DISTINCT timestep) AS n
+                    FROM cell_scalar
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                )
+                SELECT c.var
+                FROM cell_scalar c CROSS JOIN frame_count f
+                WHERE c.ship_type=%s AND c.scale=%s AND c.zone_type=%s
+                  AND f.n > 0
+                GROUP BY c.var, f.n
+                HAVING COUNT(DISTINCT c.timestep) = f.n
+                ORDER BY c.var
+                """,
+                (
+                    key.ship, key.scale, key.zone,
+                    key.ship, key.scale, key.zone,
+                ),
+            )
+            return tuple(str(row[0]).upper() for row in cur.fetchall())
+        finally:
+            cur.close()
+
+    def cfd_point_ids(self) -> range:
+        """Return implicit one-based Tecplot node IDs."""
+        self._ensure_inner()
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT node_count FROM mesh_metadata
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                """,
+                (key.ship, key.scale, key.zone),
+            )
+            row = cur.fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+            if count <= 0:
+                cur.execute(
+                    """
+                    SELECT COALESCE(MAX(node_id) + 1, 0)
+                    FROM node_coordinates
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    """,
+                    (key.ship, key.scale, key.zone),
+                )
+                count = int(cur.fetchone()[0] or 0)
+            return range(1, count + 1)
+        finally:
+            cur.close()
+
+    def _ensure_cfd_node_cell_csr(self) -> NodeCellCSR:
+        if self._cfd_node_cell_csr is not None:
+            return self._cfd_node_cell_csr
+        self._ensure_inner()
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            with timed_stage(
+                "PostgreSQL W11",
+                f"build runtime node-to-cell projection dataset={key.dataset_key} zone={key.zone}",
+            ):
+                cur.execute(
+                    """
+                    SELECT node_count FROM mesh_metadata
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    """,
+                    (key.ship, key.scale, key.zone),
+                )
+                row = cur.fetchone()
+                node_count = int(row[0]) if row and row[0] is not None else 0
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(cardinality(node_ids)), 0)
+                    FROM cell_nodes
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    """,
+                    (key.ship, key.scale, key.zone),
+                )
+                incidence_count = int(cur.fetchone()[0] or 0)
+                dense_nodes = np.empty((incidence_count,), dtype=np.int64)
+                dense_cells = np.empty((incidence_count,), dtype=np.int32)
+                cur.execute(
+                    """
+                    SELECT cell_id, node_ids
+                    FROM cell_nodes
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                    ORDER BY cell_id
+                    """,
+                    (key.ship, key.scale, key.zone),
+                )
+                pos = 0
+                max_node_id = -1
+                while True:
+                    rows = cur.fetchmany(5000)
+                    if not rows:
+                        break
+                    for cid, node_ids in rows:
+                        ids = np.asarray(node_ids or (), dtype=np.int64).reshape(-1)
+                        ids = ids[ids >= 0]
+                        n = int(ids.size)
+                        if n <= 0:
+                            continue
+                        end = pos + n
+                        if end > dense_nodes.size:
+                            # Defensive compatibility for malformed/old rows
+                            # where cardinality changed during the read.
+                            grow = max(end, int(dense_nodes.size * 1.25) + 1)
+                            dense_nodes.resize((grow,), refcheck=False)
+                            dense_cells.resize((grow,), refcheck=False)
+                        dense_nodes[pos:end] = ids
+                        dense_cells[pos:end] = int(cid)
+                        max_node_id = max(max_node_id, int(np.max(ids)))
+                        pos = end
+                dense_nodes = dense_nodes[:pos]
+                dense_cells = dense_cells[:pos]
+                if node_count <= 0:
+                    node_count = max_node_id + 1
+                self._cfd_node_cell_csr = build_node_cell_csr_from_incidence(
+                    dense_nodes, dense_cells, node_count
+                )
+        finally:
+            cur.close()
+        return self._cfd_node_cell_csr
+
+    def prepare_cfd_point_queries(self) -> None:
+        """Prebuild W11's runtime-only node/cell projection outside the timer."""
+        self._ensure_cfd_node_cell_csr()
+
+    def cfd_point_frame_extrema(
+        self, point_ids: Sequence[int], attribute_name: str
+    ) -> Dict[int, Tuple[float, float]]:
+        """Per-node extrema from runtime cell->node averaging across CFD frames."""
+        self._ensure_inner()
+        key = self._key
+        csr = self._ensure_cfd_node_cell_csr()
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT DISTINCT timestep FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s AND var=%s
+                ORDER BY timestep
+                """,
+                (key.ship, key.scale, key.zone, str(attribute_name).upper()),
+            )
+            steps = [int(row[0]) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+        def fetch_values(ts: int, cell_ids: np.ndarray) -> np.ndarray:
+            ids = [int(x) for x in np.asarray(cell_ids, dtype=np.int64).tolist()]
+            if not ids:
+                return np.zeros((0,), dtype=np.float64)
+            q = self._inner.conn.cursor()
+            try:
+                q.execute(
+                    """
+                    SELECT cell_id, value FROM cell_scalar
+                    WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                      AND timestep=%s AND var=%s AND cell_id = ANY(%s)
+                    """,
+                    (
+                        key.ship, key.scale, key.zone, int(ts),
+                        str(attribute_name).upper(), ids,
+                    ),
+                )
+                values = {int(cid): float(value) for cid, value in q.fetchall()}
+            finally:
+                q.close()
+            return np.asarray([values.get(cid, np.nan) for cid in ids], dtype=np.float64)
+
+        return point_frame_extrema_from_cell_values(csr, point_ids, steps, fetch_values)
 
     def is_h5_dataset(self) -> bool:
         """Whether the connected dataset was ingested from the ODB-like HDF5 path."""

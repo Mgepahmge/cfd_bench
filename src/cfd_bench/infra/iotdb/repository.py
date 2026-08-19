@@ -527,6 +527,83 @@ class IoTDBRepository:
         self._cfd_meta_cache[dataset_key] = dict(result)
         return result
 
+    def fetch_cfd_element_ids_in_coordinate_range(
+        self, dataset_key: str, zone: str, lower: Sequence[float], upper: Sequence[float]
+    ) -> List[int]:
+        """Return implicit one-based Tecplot element IDs by centroid range."""
+        lo = [float(x) for x in lower]
+        hi = [float(x) for x in upper]
+        path = self.path_mesh_static(dataset_key, zone, "cells")
+        rows = self.query_rows(
+            "SELECT cx FROM " + path +
+            f" WHERE cx >= {lo[0]} AND cx <= {hi[0]}"
+            f" AND cy >= {lo[1]} AND cy <= {hi[1]}"
+            f" AND cz >= {lo[2]} AND cz <= {hi[2]};"
+        )
+        return sorted(int(cell_id) + 1 for cell_id, _ in rows)
+
+    def fetch_cfd_frame_statistics(
+        self,
+        dataset_key: str,
+        zone: str,
+        step: int,
+        attribute_name: Optional[str] = None,
+    ) -> Dict[str, Dict[str, object]]:
+        """Cell-centered statistics for one legacy CFD frame."""
+        meta = self.cfd_dataset_metadata(dataset_key)
+        variables = [str(v).upper() for v in meta.get("variables", ())]
+        if attribute_name is not None:
+            wanted = str(attribute_name).upper()
+            variables = [wanted] if wanted in variables else []
+        out: Dict[str, Dict[str, object]] = {}
+        if not variables:
+            suffix = f" variable={attribute_name}" if attribute_name else ""
+            raise ValueError(f"no CFD values for frame={step}{suffix}")
+        path = self.resolve_cell_var_path(
+            dataset_key, int(step), zone=zone, probe_var=variables[0]
+        )
+        for var in variables:
+            rows = []
+            try:
+                rows = self.query_rows(
+                    f"SELECT COUNT({var}),MIN_VALUE({var}),MAX_VALUE({var}),"
+                    f"AVG({var}),STDDEV_POP({var}) FROM {path};"
+                )
+            except Exception:
+                rows = []
+            if rows and len(rows[0][1]) >= 5:
+                vals = rows[0][1]
+                out[var] = {
+                    "position": "cell",
+                    "count": _to_int(vals[0], 0),
+                    "min": _to_float(vals[1]),
+                    "max": _to_float(vals[2]),
+                    "mean": _to_float(vals[3]),
+                    "stddev": _to_float(vals[4], 0.0),
+                }
+                continue
+            try:
+                raw = self.query_rows(f"SELECT {var} FROM {path};")
+            except Exception:
+                continue
+            arr = np.asarray(
+                [_to_float(vals[0]) for _, vals in raw if vals], dtype=np.float64
+            )
+            arr = arr[np.isfinite(arr)]
+            if arr.size:
+                out[var] = {
+                    "position": "cell",
+                    "count": int(arr.size),
+                    "min": float(np.min(arr)),
+                    "max": float(np.max(arr)),
+                    "mean": float(np.mean(arr)),
+                    "stddev": float(np.std(arr)),
+                }
+        if not out:
+            suffix = f" variable={attribute_name}" if attribute_name else ""
+            raise ValueError(f"no CFD values for frame={step}{suffix}")
+        return out
+
     # -------------------- H5 metadata / W9-W11 --------------------
     def h5_dataset_metadata(self, dataset_key: str) -> Dict[str, object]:
         if dataset_key in self._h5_meta_cache:

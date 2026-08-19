@@ -14,7 +14,7 @@ def add_run_parser(subparsers: argparse._SubParsersAction) -> None:
         "--workloads",
         nargs="+",
         default=list(DEFAULT_WORKLOADS),
-        help="Workloads to run (default: w1..w8; H5-only: w9 w10 w11)",
+        help="Workloads to run (default: w1..w8; extended: w9 w10 w11)",
     )
     add_common_workload_args(ap)
     # H5 expansion is PostgreSQL-first.  Other backends remain opt-in and all

@@ -1,4 +1,4 @@
-"""W10: H5 frame statistics over mapped physical quantities."""
+"""W10: per-frame statistics over available physical quantities."""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ def _bench(label, stats_fn, duration, step):
 
 def _run_client(label, client, ship, step, duration):
     try:
-        if not client.is_h5_dataset():
-            raise RuntimeError(f"W10 currently supports H5-ingested datasets only: {ship}")
-        _bench(label, client.frame_statistics, duration, step)
+        # Frozen structural path keeps genuine H5 nodal-vs-cell semantics.
+        stats_fn = client.frame_statistics if client.is_h5_dataset() else client.cfd_frame_statistics
+        _bench(label, stats_fn, duration, step)
     finally:
         client.close()
 

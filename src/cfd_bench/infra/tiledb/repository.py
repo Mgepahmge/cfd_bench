@@ -511,6 +511,80 @@ class TileDBRepository:
         self._cfd_meta_cache[dataset_key] = dict(result)
         return result
 
+    def fetch_cfd_element_ids_in_coordinate_range(
+        self, dataset_key: str, zone: str, lower: Sequence[float], upper: Sequence[float]
+    ) -> List[int]:
+        """Return implicit one-based Tecplot element IDs by centroid range."""
+        lo = np.asarray(lower, dtype=np.float64).reshape(3)
+        hi = np.asarray(upper, dtype=np.float64).reshape(3)
+        uri = self.path_mesh_static(dataset_key, zone, "cells")
+        with self.open_array(uri, "r") as A:
+            cond = (
+                f"cx >= {float(lo[0])} and cx <= {float(hi[0])} and "
+                f"cy >= {float(lo[1])} and cy <= {float(hi[1])} and "
+                f"cz >= {float(lo[2])} and cz <= {float(hi[2])}"
+            )
+            try:
+                result = A.query(
+                    attrs=["cx", "cy", "cz"], dims=["cell_id"], cond=cond
+                )[:]
+                dense_ids = np.asarray(result["cell_id"], dtype=np.int64).reshape(-1)
+            except Exception:
+                data = A.query(attrs=["cx", "cy", "cz"])[:] if hasattr(A, "query") else A[:]
+                x = np.asarray(data["cx"], dtype=np.float64).reshape(-1)
+                y = np.asarray(data["cy"], dtype=np.float64).reshape(-1)
+                z = np.asarray(data["cz"], dtype=np.float64).reshape(-1)
+                mask = (
+                    (x >= lo[0]) & (x <= hi[0]) &
+                    (y >= lo[1]) & (y <= hi[1]) &
+                    (z >= lo[2]) & (z <= hi[2])
+                )
+                dense_ids = np.flatnonzero(mask)
+        return sorted(int(x) + 1 for x in dense_ids)
+
+    def fetch_cfd_frame_statistics(
+        self,
+        dataset_key: str,
+        zone: str,
+        step: int,
+        attribute_name: Optional[str] = None,
+    ) -> Dict[str, Dict[str, object]]:
+        """Cell-centered statistics for one legacy CFD frame."""
+        meta = self.cfd_dataset_metadata(dataset_key)
+        variables = [str(v).upper() for v in meta.get("variables", ())]
+        if attribute_name is not None:
+            wanted = str(attribute_name).upper()
+            variables = [wanted] if wanted in variables else []
+        uri = self._resolve_cell_vars_uri(dataset_key, int(step), zone)
+        out: Dict[str, Dict[str, object]] = {}
+        if not self.array_exists(uri):
+            raise ValueError(f"no CFD values for frame={step}")
+        with self.open_array(uri, "r") as A:
+            attrs = set(self._array_attr_names(A))
+            for var in variables:
+                if attrs and var not in attrs:
+                    continue
+                try:
+                    data = A.query(attrs=[var])[:]
+                except Exception:
+                    data = A[:]
+                arr = np.asarray(data[var], dtype=np.float64).reshape(-1)
+                arr = arr[np.isfinite(arr)]
+                if not arr.size:
+                    continue
+                out[var] = {
+                    "position": "cell",
+                    "count": int(arr.size),
+                    "min": float(np.min(arr)),
+                    "max": float(np.max(arr)),
+                    "mean": float(np.mean(arr)),
+                    "stddev": float(np.std(arr)),
+                }
+        if not out:
+            suffix = f" variable={attribute_name}" if attribute_name else ""
+            raise ValueError(f"no CFD values for frame={step}{suffix}")
+        return out
+
     # -------------------- H5 metadata / W9-W11 --------------------
     @staticmethod
     def _meta_text(value, default: str = "") -> str:

@@ -5,7 +5,13 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from cfd_bench.core.cfd_nodal_projection import (
+    NodeCellCSR,
+    build_node_cell_csr,
+    point_frame_extrema_from_cell_values,
+)
 from cfd_bench.core.context import MeshContext
+from cfd_bench.core.observability import timed_stage
 from cfd_bench.core.runtime_mesh import RuntimeMeshData
 from cfd_bench.core.types import LiteMesh, LitePolyData
 from cfd_bench.infra.tiledb.config import TileDBConfig
@@ -34,6 +40,7 @@ class TileDBMeshClient(AbstractContextManager):
         self.runtime = MeshRuntime(self.repo)
         self.ctx: Optional[MeshContext] = None
         self._surface_cells_normals_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._cfd_node_cell_csr: Optional[NodeCellCSR] = None
 
     def __enter__(self):
         return self
@@ -44,6 +51,7 @@ class TileDBMeshClient(AbstractContextManager):
 
     def close(self):
         self.runtime.clear()
+        self._cfd_node_cell_csr = None
 
     def connect(
         self,
@@ -81,6 +89,7 @@ class TileDBMeshClient(AbstractContextManager):
 
         self.ctx = ctx
         self._surface_cells_normals_cache = None
+        self._cfd_node_cell_csr = None
         return ctx
 
     def _require_ctx(self) -> MeshContext:
@@ -367,6 +376,88 @@ class TileDBMeshClient(AbstractContextManager):
             meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
             variables = list(meta.get("variables", ())) or ["U", "V", "W", "P", "K", "E"]
         return self.repo.fetch_max_diffs(ctx.dataset_key, ts, variables)
+
+    # Legacy CFD-only W9-W11 primitives.  H5 methods below remain separate so
+    # structural source-label and genuine nodal-field behaviour is unchanged.
+    def cfd_element_ids_in_coordinate_range(
+        self, lower_bound: Sequence[float], upper_bound: Sequence[float]
+    ) -> np.ndarray:
+        ctx = self._require_ctx()
+        ids = self.repo.fetch_cfd_element_ids_in_coordinate_range(
+            ctx.dataset_key, ctx.zone, lower_bound, upper_bound
+        )
+        return np.asarray(ids, dtype=np.int64)
+
+    def cfd_frame_statistics(
+        self, attribute_name: Optional[str] = None, step: Optional[int] = None
+    ):
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        return self.repo.fetch_cfd_frame_statistics(
+            ctx.dataset_key, ctx.zone, ts, attribute_name=attribute_name
+        )
+
+    def cfd_variables(self) -> Tuple[str, ...]:
+        ctx = self._require_ctx()
+        meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
+        return tuple(str(v).upper() for v in meta.get("variables", ()))
+
+    def cfd_point_ids(self) -> range:
+        ctx = self._require_ctx()
+        meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
+        count = int(meta.get("node_count", 0) or 0)
+        if count <= 0:
+            try:
+                count = int(self.repo.fetch_mesh_meta(ctx.dataset_key, ctx.zone).get("node_count", 0))
+            except Exception:
+                count = 0
+        return range(1, count + 1)
+
+    def _ensure_cfd_node_cell_csr(self) -> NodeCellCSR:
+        if self._cfd_node_cell_csr is not None:
+            return self._cfd_node_cell_csr
+        ctx = self._require_ctx()
+        meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
+        node_count = int(meta.get("node_count", 0) or 0)
+        if node_count <= 0:
+            try:
+                node_count = int(self.repo.fetch_mesh_meta(ctx.dataset_key, ctx.zone).get("node_count", 0))
+            except Exception:
+                node_count = 0
+        with timed_stage(
+            "TileDB W11",
+            f"build runtime node-to-cell projection dataset={ctx.dataset_key} zone={ctx.zone}",
+        ):
+            cell_nodes = self.repo.fetch_cell_nodes(ctx.dataset_key, ctx.zone)
+            if node_count <= 0 and cell_nodes:
+                node_count = 1 + max(
+                    (max(nodes) for nodes in cell_nodes.values() if nodes),
+                    default=-1,
+                )
+            self._cfd_node_cell_csr = build_node_cell_csr(cell_nodes, node_count)
+        return self._cfd_node_cell_csr
+
+    def prepare_cfd_point_queries(self) -> None:
+        self._ensure_cfd_node_cell_csr()
+
+    def cfd_point_frame_extrema(self, point_ids: Sequence[int], attribute_name: str):
+        ctx = self._require_ctx()
+        csr = self._ensure_cfd_node_cell_csr()
+        meta = self.repo.cfd_dataset_metadata(ctx.dataset_key)
+        steps = [int(x) for x in meta.get("timesteps", ())]
+
+        def fetch_values(ts: int, cell_ids: np.ndarray) -> np.ndarray:
+            ids = [int(x) for x in np.asarray(cell_ids, dtype=np.int64).tolist()]
+            values = self.repo.fetch_cell_scalar_map(
+                ctx.dataset_key,
+                int(ts),
+                str(attribute_name).upper(),
+                ids,
+                zone=ctx.zone,
+            )
+            return np.asarray([values.get(cid, np.nan) for cid in ids], dtype=np.float64)
+
+        return point_frame_extrema_from_cell_values(csr, point_ids, steps, fetch_values)
 
     def is_h5_dataset(self) -> bool:
         ctx = self._require_ctx()
