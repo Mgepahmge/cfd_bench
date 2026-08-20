@@ -15,6 +15,7 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import cell_count, make_geom_client
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 
 
 def read_max_diffs(path: str) -> dict:
@@ -76,7 +77,11 @@ def _bench(label, scalar_fn, range_fn, extract_fn, iso_fn, n_cells, max_diffs, d
             iso_fn(sub, var, iso_val)
             txn += 1
             prog.transaction()
-    print(f"{label} W3: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W3: {txn} txns in {duration}s",
+        backend=label, operation="range_submesh_isosurface",
+        transactions=txn, duration_sec=duration,
+    )
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):

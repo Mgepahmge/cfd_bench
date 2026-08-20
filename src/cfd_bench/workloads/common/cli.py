@@ -11,6 +11,7 @@ from cfd_bench.core.paths import (
     resolve_vtk_hull_dir,
 )
 from cfd_bench.workloads.common.config import WorkloadConfig
+from cfd_bench.core.warnings_state import preserve_warning_filters
 
 
 def add_common_workload_args(ap: argparse.ArgumentParser) -> None:
@@ -99,9 +100,14 @@ def workload_config_from_args(args, datasets=None, ships=None) -> WorkloadConfig
     )
     if needs_iotdb_discovery:
         try:
-            from cfd_bench.infra.iotdb.discovery import discover_iotdb_datasets
+            # IoTDB's Python client changes the process-wide DeprecationWarning
+            # filter when Session is imported.  Keep runtime discovery isolated
+            # so a later TileDB benchmark sees the same warning state as a
+            # standalone TileDB run.
+            with preserve_warning_filters():
+                from cfd_bench.infra.iotdb.discovery import discover_iotdb_datasets
 
-            infos = discover_iotdb_datasets(requested_ships)
+                infos = discover_iotdb_datasets(requested_ships)
         except Exception:
             infos = []
         for info in infos:

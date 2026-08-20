@@ -14,6 +14,7 @@ from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import aggregation
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 from cfd_bench.workloads.common.random_geom import (
     random_line_in_bbox,
     random_plane_in_bbox,
@@ -21,7 +22,7 @@ from cfd_bench.workloads.common.random_geom import (
 )
 
 
-def _run_point_queries(label, query_fn, scalar_fn, bounds, duration, variables, *, max_hit_attempts=None, progress=False, progress_interval=5.0):
+def _run_point_queries(label, query_fn, scalar_fn, bounds, duration, variables, *, step=None, max_hit_attempts=None, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
     with benchmark_progress(f"{label} W1/point", duration, enabled=progress, interval=progress_interval) as prog:
@@ -43,10 +44,14 @@ def _run_point_queries(label, query_fn, scalar_fn, bounds, duration, variables, 
                 aggregation(vals)
             txn += 1
             prog.transaction()
-    print(f"{label} point intersection: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} point intersection: {txn} txns in {duration}s",
+        backend=label, operation="point_intersection", transactions=txn,
+        duration_sec=duration, step=step,
+    )
 
 
-def _run_line_queries(label, query_fn, scalar_fn, bounds, duration, variables, *, progress=False, progress_interval=5.0):
+def _run_line_queries(label, query_fn, scalar_fn, bounds, duration, variables, *, step=None, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
     with benchmark_progress(f"{label} W1/line", duration, enabled=progress, interval=progress_interval) as prog:
@@ -60,10 +65,14 @@ def _run_line_queries(label, query_fn, scalar_fn, bounds, duration, variables, *
                 scalar_fn(cells, var)
             txn += 1
             prog.transaction()
-    print(f"{label} line intersection: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} line intersection: {txn} txns in {duration}s",
+        backend=label, operation="line_intersection", transactions=txn,
+        duration_sec=duration, step=step,
+    )
 
 
-def _run_plane_queries(label, query_fn, scalar_fn, bounds, duration, variables, *, progress=False, progress_interval=5.0):
+def _run_plane_queries(label, query_fn, scalar_fn, bounds, duration, variables, *, step=None, progress=False, progress_interval=5.0):
     txn = 0
     t0 = time.time()
     with benchmark_progress(f"{label} W1/plane", duration, enabled=progress, interval=progress_interval) as prog:
@@ -77,7 +86,11 @@ def _run_plane_queries(label, query_fn, scalar_fn, bounds, duration, variables, 
                 scalar_fn(cells, var)
             txn += 1
             prog.transaction()
-    print(f"{label} plane intersection: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} plane intersection: {txn} txns in {duration}s",
+        backend=label, operation="plane_intersection", transactions=txn,
+        duration_sec=duration, step=step,
+    )
 
 
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
@@ -102,9 +115,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def pg_scalar(cells, var):
                     return pg.point_query(cells, var)
 
-                _run_point_queries("PG", geom.point_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(pg) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_line_queries("PG", geom.line_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_plane_queries("PG", geom.plane_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_point_queries("PG", geom.point_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, max_hit_attempts=None if is_h5_client(pg) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_line_queries("PG", geom.line_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_plane_queries("PG", geom.plane_intersection, pg_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             pg.close()
 
         if "iotdb" in backends:
@@ -118,9 +131,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def iotdb_scalar(cells, var):
                     return iotdb.point_query(cells, var)
 
-                _run_point_queries("IoTDB", geom.point_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(iotdb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_line_queries("IoTDB", geom.line_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_plane_queries("IoTDB", geom.plane_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_point_queries("IoTDB", geom.point_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, max_hit_attempts=None if is_h5_client(iotdb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_line_queries("IoTDB", geom.line_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_plane_queries("IoTDB", geom.plane_intersection, iotdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             iotdb.close()
 
         if "tiledb" in backends:
@@ -134,9 +147,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def tdb_scalar(cells, var):
                     return tiledb.point_query(cells, var)
 
-                _run_point_queries("TileDB", geom.point_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(tiledb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_line_queries("TileDB", geom.line_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_plane_queries("TileDB", geom.plane_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_point_queries("TileDB", geom.point_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, max_hit_attempts=None if is_h5_client(tiledb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_line_queries("TileDB", geom.line_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_plane_queries("TileDB", geom.plane_intersection, tdb_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             tiledb.close()
 
         if "vtk" in backends:
@@ -149,9 +162,9 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                 def vtk_scalar(cells, var):
                     return vtk.point_query(cells, var)
 
-                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=64, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
-                _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_point_queries("VTK", vtk.point_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, max_hit_attempts=64, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_line_queries("VTK", vtk.line_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _run_plane_queries("VTK", vtk.plane_intersection, vtk_scalar, bounds, cfg.duration_sec, cfg.valid_variables(ship), step=step, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
             vtk.close()
 
 

@@ -9,6 +9,7 @@ import time
 from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
+from cfd_bench.core.results import emit_benchmark_result
 
 
 POINT_BATCH_SIZE = 32
@@ -55,9 +56,12 @@ def _bench(label, extrema_fn, point_ids, variables, duration, batch_size=POINT_B
         var = random.choice(variables)
         extrema_fn(points, var)
         txn += 1
-    print(
+    emit_benchmark_result(
         f"{label} W11: {txn} txns in {duration}s "
-        f"(batch={batch_size}, nodal_vars={variables})"
+        f"(batch={batch_size}, nodal_vars={variables})",
+        backend=label, operation="point_extrema_all_frames",
+        transactions=txn, duration_sec=duration,
+        details=f"batch={batch_size}; nodal_vars={','.join(variables)}",
     )
 
 
@@ -74,9 +78,12 @@ def _bench_cfd(label, extrema_fn, point_ids, variables, duration, batch_size=POI
         var = random.choice(variables)
         extrema_fn(points, var)
         txn += 1
-    print(
+    emit_benchmark_result(
         f"{label} W11: {txn} txns in {duration}s "
-        f"(batch={batch_size}, projected_cell_vars={variables})"
+        f"(batch={batch_size}, projected_cell_vars={variables})",
+        backend=label, operation="point_extrema_all_frames",
+        transactions=txn, duration_sec=duration,
+        details=f"batch={batch_size}; projected_cell_vars={','.join(variables)}",
     )
 
 

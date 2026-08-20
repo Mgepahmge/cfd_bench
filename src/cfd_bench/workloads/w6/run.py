@@ -13,6 +13,7 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import cell_count, make_geom_client, uses_vtk_geom
 from cfd_bench.workloads.common.metrics import calculate_force
 from cfd_bench.core.observability import benchmark_progress, stage
+from cfd_bench.core.results import emit_benchmark_result
 
 
 def _bench(label, norm_fn, pressure_fn, n_cells, duration, *, progress=False, progress_interval=5.0):
@@ -29,7 +30,11 @@ def _bench(label, norm_fn, pressure_fn, n_cells, duration, *, progress=False, pr
             calculate_force(normals, pressures)
             txn += 1
             prog.transaction()
-    print(f"{label} W6: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W6: {txn} txns in {duration}s",
+        backend=label, operation="surface_force", transactions=txn,
+        duration_sec=duration,
+    )
 
 
 def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
@@ -50,7 +55,11 @@ def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=Fals
             calculate_force(normals[:n], values[:n])
             txn += 1
             prog.transaction()
-    print(f"PG W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})")
+    emit_benchmark_result(
+        f"PG W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})",
+        backend="PG", operation="surface_force", transactions=txn,
+        duration_sec=duration, details=f"zone={client.ctx.zone}; scalar={scalar_name}",
+    )
 
 
 def _bench_iotdb_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
@@ -78,7 +87,11 @@ def _bench_iotdb_native(client, scalar_name: str, duration: float, *, progress=F
             calculate_force(normals[:n], values[:n])
             txn += 1
             prog.transaction()
-    print(f"IoTDB W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})")
+    emit_benchmark_result(
+        f"IoTDB W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})",
+        backend="IoTDB", operation="surface_force", transactions=txn,
+        duration_sec=duration, details=f"zone={client.ctx.zone}; scalar={scalar_name}",
+    )
 
 
 def _bench_tiledb_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
@@ -100,7 +113,11 @@ def _bench_tiledb_native(client, scalar_name: str, duration: float, *, progress=
             calculate_force(normals[:n], values[:n])
             txn += 1
             prog.transaction()
-    print(f"TileDB W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})")
+    emit_benchmark_result(
+        f"TileDB W6: {txn} txns in {duration}s (zone={client.ctx.zone}, scalar={scalar_name})",
+        backend="TileDB", operation="surface_force", transactions=txn,
+        duration_sec=duration, details=f"zone={client.ctx.zone}; scalar={scalar_name}",
+    )
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):

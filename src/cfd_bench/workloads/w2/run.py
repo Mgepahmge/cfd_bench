@@ -14,6 +14,7 @@ from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import aggregation_w2
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 from cfd_bench.workloads.common.random_geom import random_coord_range
 
 
@@ -45,7 +46,12 @@ def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables, *, ma
             aggregation_w2(result)
             txn += 1
             prog.transaction()
-    print(f"{label} W2: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W2: {txn} txns in {duration}s",
+        backend=label, operation="coordinate_range_multi_step",
+        transactions=txn, duration_sec=duration,
+        details=f"steps={','.join(str(s) for s in steps)}",
+    )
 
 
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):

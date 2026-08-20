@@ -8,6 +8,7 @@ import time
 from cfd_bench.workloads.common.backends import make_iotdb, make_pg, make_tiledb, make_vtk
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.common.config import WorkloadConfig
+from cfd_bench.core.results import emit_benchmark_result
 
 
 def _bench(label, stats_fn, duration, step):
@@ -16,7 +17,11 @@ def _bench(label, stats_fn, duration, step):
     while time.time() - t0 < duration:
         stats_fn(step=step)
         txn += 1
-    print(f"{label} W10: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W10: {txn} txns in {duration}s",
+        backend=label, operation="frame_statistics", transactions=txn,
+        duration_sec=duration, step=step,
+    )
 
 
 def _run_client(label, client, ship, step, duration):

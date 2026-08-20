@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 
 from cfd_bench.workloads.common.vtk_files import resolve_vtk_file
 from cfd_bench.core.observability import timed_stage
+from cfd_bench.core.warnings_state import preserve_warning_filters
 
 
 def parse_ship(ship: str) -> Tuple[str, str]:
@@ -21,11 +22,15 @@ def parse_ship(ship: str) -> Tuple[str, str]:
 
 
 def make_iotdb(ship: str, step: int, zone: str = "0_Fluid"):
-    from cfd_bench.API.iotdb_api.client import IoTDBMeshClient
+    # The apache-iotdb driver mutates Python's global DeprecationWarning filter
+    # while importing Session.  Isolate that third-party side effect so later
+    # backends in the same process behave exactly like standalone runs.
+    with preserve_warning_filters():
+        from cfd_bench.API.iotdb_api.client import IoTDBMeshClient
 
-    client = IoTDBMeshClient()
-    with timed_stage("IoTDB", f"connect dataset={ship} step={step} zone={zone}"):
-        client.connect(ship, step, zone)
+        client = IoTDBMeshClient()
+        with timed_stage("IoTDB", f"connect dataset={ship} step={step} zone={zone}"):
+            client.connect(ship, step, zone)
     return client
 
 

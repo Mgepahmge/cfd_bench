@@ -11,6 +11,7 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import VARIABLES, WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, random_var_range_db, uses_vtk_geom
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 
 
 def random_var_range_vtk(vtk_mesh, attribute_name: str):
@@ -37,7 +38,11 @@ def _bench(label, range_fn, client, geom_client, duration, step, variables, *, p
             range_fn(lo, hi, var)
             txn += 1
             prog.transaction()
-    print(f"{label} W8: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W8: {txn} txns in {duration}s",
+        backend=label, operation="variable_range", transactions=txn,
+        duration_sec=duration,
+    )
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):

@@ -168,8 +168,11 @@ def test_vtk_h5_backend_preserves_source_ids_and_genuine_nodal_fields(tmp_path: 
 
 
 def test_vtk_tiny_h5_all_workloads_complete(tmp_path: Path, capsys):
+    import csv
+
     h5_path = tmp_path / "beam.h5"
     root = tmp_path / "vtk"
+    output = tmp_path / "results.csv"
     _write_h5_case(h5_path)
     plan, mesh, frames = build_ingest_plan(str(h5_path))
     write_h5_plan_to_vtk("beam", "0_Fluid", str(root), plan, mesh, frames)
@@ -179,12 +182,20 @@ def test_vtk_tiny_h5_all_workloads_complete(tmp_path: Path, capsys):
         "--workloads", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11",
         "--steps", "0", "--duration", "0.005",
         "--datasets", "beam", "--vtk-dir", str(root), "--zone-fluid", "0_Fluid",
+        "--output", str(output),
     ])
     assert rc == 0
     out = capsys.readouterr().out
     for wid in range(1, 12):
         assert f"Running w{wid}" in out
     assert "VTK W11:" in out
+
+    with output.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    workloads = {row["workload"] for row in rows}
+    assert workloads == {f"w{i}" for i in range(1, 12)}
+    assert {row["backend"] for row in rows} == {"vtk"}
+    assert all(row["dataset"] == "beam" for row in rows)
 
 
 def test_vtk_baseline_fidelity_keeps_original_query_costs_inside_transactions(tmp_path: Path):

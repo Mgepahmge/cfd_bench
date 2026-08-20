@@ -7,6 +7,7 @@ import time
 from typing import Sequence, Set
 
 from cfd_bench.core.observability import stage
+from cfd_bench.core.results import result_context
 from cfd_bench.workloads.common.config import WorkloadConfig
 
 DEFAULT_WORKLOADS = ("w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8")
@@ -22,7 +23,8 @@ def run_workload(workload_id: str, cfg: WorkloadConfig, backends: Set[str]) -> N
             stage(label, "start")
             t0 = time.perf_counter()
             try:
-                mod.run_ship(cfg, ship, backends)
+                with result_context(workload_id, ship):
+                    mod.run_ship(cfg, ship, backends)
             finally:
                 stage(label, f"finished (wall={time.perf_counter() - t0:.3f}s)")
     elif hasattr(mod, "run_ship_step"):
@@ -35,7 +37,8 @@ def run_workload(workload_id: str, cfg: WorkloadConfig, backends: Set[str]) -> N
                 stage(label, "start")
                 t0 = time.perf_counter()
                 try:
-                    mod.run_ship_step(cfg, ship, step, backends)
+                    with result_context(workload_id, ship, step):
+                        mod.run_ship_step(cfg, ship, step, backends)
                 finally:
                     stage(label, f"finished (wall={time.perf_counter() - t0:.3f}s)")
     else:

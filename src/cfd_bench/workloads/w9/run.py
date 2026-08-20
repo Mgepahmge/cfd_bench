@@ -10,6 +10,7 @@ from cfd_bench.workloads.common.cli import add_common_workload_args, workload_co
 from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import mesh_bounds
 from cfd_bench.workloads.common.random_geom import random_coord_range
+from cfd_bench.core.results import emit_benchmark_result
 
 
 def _element_range_fn(client):
@@ -28,7 +29,11 @@ def _bench(label, range_fn, bounds, duration):
         lo, hi = random_coord_range(bounds)
         range_fn(lo, hi)
         txn += 1
-    print(f"{label} W9: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W9: {txn} txns in {duration}s",
+        backend=label, operation="element_coordinate_range",
+        transactions=txn, duration_sec=duration,
+    )
 
 
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):

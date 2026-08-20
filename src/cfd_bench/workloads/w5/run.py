@@ -13,6 +13,7 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import cal_next_point
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 from cfd_bench.workloads.common.random_geom import random_start_point
 
 
@@ -97,7 +98,11 @@ def _streamline(label, scalar_fn, intersect_fn, bounds, duration, delta_t=1.0, *
             txn += 1
             prog.transaction()
 
-    print(f"{label} W5: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W5: {txn} txns in {duration}s",
+        backend=label, operation="streamline", transactions=txn,
+        duration_sec=duration,
+    )
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):

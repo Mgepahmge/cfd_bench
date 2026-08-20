@@ -6,6 +6,7 @@ import argparse
 
 from cfd_bench.workloads.common.cli import add_common_workload_args, workload_config_from_args
 from cfd_bench.workloads.runner import DEFAULT_WORKLOADS, run_all
+from cfd_bench.core.results import csv_result_output
 
 
 def add_run_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -17,6 +18,12 @@ def add_run_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Workloads to run (default: w1..w8; extended: w9 w10 w11)",
     )
     add_common_workload_args(ap)
+    ap.add_argument(
+        "--output",
+        default=None,
+        metavar="RESULTS.csv",
+        help="Mirror completed benchmark readings to a CSV file (disabled by default)",
+    )
     # H5 expansion is PostgreSQL-first.  Other backends remain opt-in and all
     # legacy arguments are still available as overrides.
     ap.set_defaults(
@@ -36,5 +43,8 @@ def run_run(args: argparse.Namespace) -> int:
             f"  {ship}: zone={cfg.fluid_zone(ship)} "
             f"steps={cfg.valid_steps(ship)} vars={cfg.valid_variables(ship)}"
         )
-    run_all(cfg, backends, workloads=args.workloads)
+    with csv_result_output(args.output) as writer:
+        if writer is not None:
+            print(f"  csv_results={writer.path}")
+        run_all(cfg, backends, workloads=args.workloads)
     return 0

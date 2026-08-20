@@ -14,6 +14,7 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.metrics import cal_next_point
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 from cfd_bench.workloads.common.random_geom import random_start_point
 
 
@@ -41,7 +42,12 @@ def _advect(label, scalar_fn, intersect_fn, bounds, steps, duration, delta_t=0.0
                 cur_coord = nxt
             txn += 1
             prog.transaction()
-    print(f"{label} W4: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W4: {txn} txns in {duration}s",
+        backend=label, operation="particle_advection_multi_step",
+        transactions=txn, duration_sec=duration,
+        details=f"steps={','.join(str(s) for s in steps)}",
+    )
 
 
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):

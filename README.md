@@ -177,6 +177,23 @@ cfd-bench run --workloads w1 w2 --datasets JBC_615k --backend iotdb --duration 1
 cfd-bench run --datasets JBC_615k --backend vtk
 ```
 
+### CSV benchmark output
+
+Console output remains unchanged. Pass `--output` to mirror each completed benchmark section to a CSV file **after** its timed loop finishes:
+
+```bash
+cfd-bench run \
+  --backend postgresql iotdb tiledb vtk \
+  --workloads w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 \
+  --datasets Kvlcc_351K_Small \
+  --duration 10 \
+  --output results.csv
+```
+
+The CSV columns are `run_id,timestamp_utc,dataset,workload,backend,operation,step,transactions,duration_sec,txns_per_sec,details`. W1 emits separate point/line/plane rows; W6 records zone/scalar details when available; W11 records batch and variable information. Without `--output`, no result file is opened and console behavior remains unchanged. The requested CSV path is created/overwritten once per `cfd-bench run` invocation. CSV rows are written only after a benchmark section has left its timing loop, so result persistence does not consume transaction-window time.
+
+When IoTDB and TileDB are selected in the same process, CFD-Bench also isolates the Apache IoTDB driver's process-wide `DeprecationWarning` filter change around IoTDB discovery/connect. This keeps later TileDB warning behavior consistent with a standalone TileDB run without globally suppressing warnings.
+
 ### Single workload (developer path)
 
 ```bash

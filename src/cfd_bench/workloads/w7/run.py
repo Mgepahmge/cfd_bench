@@ -14,6 +14,7 @@ from cfd_bench.workloads.common.config import WorkloadConfig
 from cfd_bench.workloads.common.geom_resolver import make_geom_client, mesh_bounds
 from cfd_bench.workloads.common.random_geom import random_coord_range
 from cfd_bench.core.observability import benchmark_progress
+from cfd_bench.core.results import emit_benchmark_result
 
 
 def _bench_db(label, coord_fn, qc_fn, bounds, duration, *, max_hit_attempts=None, progress=False, progress_interval=5.0):
@@ -35,7 +36,11 @@ def _bench_db(label, coord_fn, qc_fn, bounds, duration, *, max_hit_attempts=None
                 qc_fn(lo, hi)
             txn += 1
             prog.transaction()
-    print(f"{label} W7: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W7: {txn} txns in {duration}s",
+        backend=label, operation="qcriterion_roi", transactions=txn,
+        duration_sec=duration,
+    )
 
 
 def _bench_vtk(label, geom, bounds, duration, *, progress=False, progress_interval=5.0):
@@ -67,7 +72,11 @@ def _bench_vtk(label, geom, bounds, duration, *, progress=False, progress_interv
                     pass
             txn += 1
             prog.transaction()
-    print(f"{label} W7: {txn} txns in {duration}s")
+    emit_benchmark_result(
+        f"{label} W7: {txn} txns in {duration}s",
+        backend=label, operation="qcriterion_roi", transactions=txn,
+        duration_sec=duration,
+    )
 
 
 def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
