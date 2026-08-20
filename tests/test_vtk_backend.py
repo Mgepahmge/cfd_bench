@@ -185,3 +185,45 @@ def test_vtk_tiny_h5_all_workloads_complete(tmp_path: Path, capsys):
     for wid in range(1, 12):
         assert f"Running w{wid}" in out
     assert "VTK W11:" in out
+
+
+def test_vtk_baseline_fidelity_keeps_original_query_costs_inside_transactions(tmp_path: Path):
+    dat = tmp_path / "dat"
+    root = tmp_path / "vtk"
+    _write_cfd_case(dat)
+    assert cli_main([
+        "ingest", "--dat", str(dat), "--datasets", "tiny_cfd",
+        "--backends", "vtk", "--zone-indices", "0", "--vtk-root", str(root),
+    ]) == 0
+
+    client = VTKMeshClient(root_path=str(root))
+    assert client.baseline_fidelity is True
+    client.connect("tiny_cfd", 200, "0_Fluid")
+
+    # The baseline path must not populate v16's hot query caches.
+    np.testing.assert_allclose(client.point_query([0, 1], "U"), [1.0, 2.0])
+    assert client._arrays == {}
+
+    assert client.range_query_coord([-1, -1, -2], [2, 2, 2]).tolist() == [0, 1]
+    assert client._bounds_cache == {}
+
+    client.point_intersection(np.array([[0.1, 0.1, 0.1]], dtype=np.float64))
+    assert client._locator_cache == {}
+
+    # Explicit timestep reads (W2/W4/W10/W11) are intentionally not retained:
+    # the original VTK benchmark reopened frame files inside timed transactions.
+    np.testing.assert_allclose(client.point_query([0], "U", step=400), [2.0])
+    assert ("0_Fluid", 400) not in client._grids
+    client.close()
+
+    # The optimized implementation remains available for non-benchmark tooling,
+    # but it is no longer the default benchmark semantics.
+    fast = VTKMeshClient(root_path=str(root), baseline_fidelity=False)
+    fast.connect("tiny_cfd", 200, "0_Fluid")
+    np.testing.assert_allclose(fast.point_query([0], "U"), [1.0])
+    assert fast._arrays
+    fast.range_query_coord([-1, -1, -2], [2, 2, 2])
+    assert fast._bounds_cache
+    fast.point_intersection(np.array([[0.1, 0.1, 0.1]], dtype=np.float64))
+    assert fast._locator_cache
+    fast.close()
