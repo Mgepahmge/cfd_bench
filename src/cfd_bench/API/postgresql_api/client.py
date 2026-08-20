@@ -229,6 +229,61 @@ class PostgreSQLMeshClient:
         self._sync_timestep(step)
         return self._inner.point_query(None, cell_indexes, attribute_name, timestep=step)
 
+    def bulk_point_query(
+        self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None
+    ) -> np.ndarray:
+        """Fast ordered scalar read for large contiguous CFD selections.
+
+        W6 usually asks for every cell in a surface zone. Passing tens of
+        thousands of IDs through ``ANY(array)`` adds avoidable parameter and
+        planning overhead; a contiguous primary-key range scan is equivalent
+        and substantially cheaper. Sparse selections keep the frozen point
+        query path.
+        """
+        self._ensure_inner()
+        self._sync_timestep(step)
+        ids = np.asarray(list(cell_indexes), dtype=np.int64).reshape(-1)
+        if ids.size == 0:
+            return np.zeros((0,), dtype=np.float64)
+        unique_ids = np.unique(ids)
+        contiguous = (
+            unique_ids.size == ids.size
+            and int(unique_ids[-1]) - int(unique_ids[0]) + 1 == unique_ids.size
+        )
+        if not contiguous:
+            return self.point_query(ids, attribute_name, step=step)
+
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT cell_id, value
+                FROM cell_scalar
+                WHERE ship_type=%s AND scale=%s AND zone_type=%s
+                  AND timestep=%s AND var=%s
+                  AND cell_id BETWEEN %s AND %s
+                ORDER BY cell_id
+                """,
+                (
+                    key.ship, key.scale, key.zone, ts,
+                    str(attribute_name).upper(),
+                    int(unique_ids[0]), int(unique_ids[-1]),
+                ),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+        if len(rows) != ids.size:
+            return self.point_query(ids, attribute_name, step=step)
+        row_ids = np.asarray([int(r[0]) for r in rows], dtype=np.int64)
+        if not np.array_equal(row_ids, ids):
+            mapping = {int(cid): float(value) for cid, value in rows}
+            return np.asarray([mapping.get(int(cid), np.nan) for cid in ids], dtype=np.float64)
+        return np.asarray([float(r[1]) for r in rows], dtype=np.float64)
+
     def velocity_query(self, cell_indexes: Sequence[int], step: Optional[int] = None) -> np.ndarray:
         """Fetch U/V/W for cells with one SQL query instead of three point queries."""
         self._ensure_inner()

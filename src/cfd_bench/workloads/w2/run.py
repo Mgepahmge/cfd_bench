@@ -80,11 +80,15 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
         bounds = mesh_bounds(cfg, ship, ref_step, iotdb, geom, cfg.fluid_zone(ship)) or shared_bounds
         if bounds:
 
+            iot_h5 = is_h5_client(iotdb)
+
             def iot_scalar(cells, var, step):
                 iotdb.ctx.step = step
-                return iotdb.point_query(cells, var)
+                if iot_h5:
+                    return iotdb.point_query(cells, var)
+                return iotdb.bulk_point_query(cells, var)
 
-            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if is_h5_client(iotdb) else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+            _bench("IoTDB", geom.range_query_coord, iot_scalar, bounds, steps, cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=None if iot_h5 else 16, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
         iotdb.close()
 
     if "tiledb" in backends:

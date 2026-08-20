@@ -148,6 +148,16 @@ class IoTDBMeshClient(AbstractContextManager):
         out = [scalar_map.get(int(cid), np.nan) for cid in cell_indexes]
         return np.array(out, dtype=np.float64)
 
+    def bulk_point_query(
+        self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None
+    ) -> np.ndarray:
+        """Opt-in large-selection scalar fetch used by W2/W6 CFD paths."""
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        return self.repo.fetch_cell_scalar_values_bulk(
+            ctx.dataset_key, ts, attribute_name, cell_indexes, zone=ctx.zone
+        )
+
     def velocity_query(self, cell_indexes: Sequence[int], step: Optional[int] = None) -> np.ndarray:
         """Fetch U/V/W in one backend round-trip for W4/W5/W7-style access."""
         ctx = self._require_ctx()

@@ -47,7 +47,7 @@ def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=Fals
             if len(cells) == 0 or len(normals) == 0:
                 break
             prog.set_phase(f"scalar query {scalar_name} ({len(cells)} cells)")
-            values = client.point_query(cells, scalar_name)
+            values = client.bulk_point_query(cells, scalar_name)
             n = min(len(normals), len(values))
             if n == 0:
                 break
@@ -62,7 +62,7 @@ def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=Fals
     )
 
 
-def _bench_iotdb_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
+def _bench_iotdb_native(client, scalar_name: str, duration: float, *, bulk_scalar=False, progress=False, progress_interval=5.0):
     """IoTDB-native W6 with explicit surface-cell ids.
 
     Legacy CFD boundary faces are stored as face rows whose owning cell ids are
@@ -79,7 +79,11 @@ def _bench_iotdb_native(client, scalar_name: str, duration: float, *, progress=F
             if len(cells) == 0 or len(normals) == 0:
                 break
             prog.set_phase(f"scalar query {scalar_name} ({len(cells)} cells)")
-            values = client.point_query(cells, scalar_name)
+            values = (
+                client.bulk_point_query(cells, scalar_name)
+                if bulk_scalar
+                else client.point_query(cells, scalar_name)
+            )
             n = min(len(normals), len(values))
             if n == 0:
                 break
@@ -190,7 +194,8 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             # legacy CFD uses the full discovered zone list.
             probe = make_iotdb(ship, step, zone=cfg.fluid_zone(ship))
             try:
-                if probe.is_h5_dataset():
+                iot_h5 = probe.is_h5_dataset()
+                if iot_h5:
                     zones = []
                     for zone in (cfg.zone_hull, cfg.fluid_zone(ship)):
                         if zone and zone not in zones:
@@ -223,7 +228,10 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
                 )
             iotdb, scalar_name = selected
             try:
-                _bench_iotdb_native(iotdb, scalar_name, cfg.duration_sec, progress=cfg.progress, progress_interval=cfg.progress_interval_sec)
+                _bench_iotdb_native(
+                    iotdb, scalar_name, cfg.duration_sec, bulk_scalar=not iot_h5,
+                    progress=cfg.progress, progress_interval=cfg.progress_interval_sec
+                )
             finally:
                 iotdb.close()
 

@@ -98,9 +98,15 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
         vtk = make_vtk(cfg.vtk_dir, ship, step, cfg.fluid_zone(ship))
         _bench(
             "VTK",
-            lambda lo, hi, v: vtk.range_query_var(lo, hi, v),
+            # Explicit step keeps the VTK file read inside each W8
+            # transaction in baseline-fidelity mode instead of benchmarking
+            # an already-resident in-memory frame.
+            lambda lo, hi, v: vtk.range_query_var(lo, hi, v, step=step),
             vtk,
-            vtk,
+            # Treat VTK W8 as an end-to-end file-backed transaction: range
+            # sampling goes through client.var_value_range(step=...) rather
+            # than the already-resident vtk_mesh.GetRange() fast path.
+            None,
             cfg.duration_sec,
             step,
             cfg.valid_variables(ship),

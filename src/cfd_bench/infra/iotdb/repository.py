@@ -163,6 +163,106 @@ class IoTDBRepository:
                     out[int(cid)] = _to_float(vals[0])
         return out
 
+    def fetch_cell_scalar_values_bulk(
+        self,
+        dataset_key: str,
+        step: int,
+        var: str,
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
+    ) -> np.ndarray:
+        """High-throughput scalar fetch for large CFD cell selections.
+
+        W2/W6 can select tens of thousands of cells.  Building many
+        ``Time IN (...)`` statements is dominated by SQL parsing and network
+        round-trips in IoTDB.  For a large selection, query one contiguous
+        time window (using the native raw-data API when available) and keep
+        only the requested timestamps locally.  Small selections retain the
+        historical point-query path.
+
+        This helper is intentionally opt-in; existing workloads continue to
+        use :meth:`fetch_cell_scalar_map` unless their benchmark explicitly
+        requests the bulk path.
+        """
+        ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
+        if ids.size == 0:
+            return np.zeros((0,), dtype=np.float64)
+
+        # Preserve duplicate/order semantics while doing the backend query on
+        # sorted unique IDs.
+        unique_ids, inverse = np.unique(ids, return_inverse=True)
+        if unique_ids.size <= 4096:
+            values = self.fetch_cell_scalar_map(
+                dataset_key, step, var, unique_ids.tolist(), zone=zone
+            )
+            unique_values = np.asarray(
+                [values.get(int(cid), np.nan) for cid in unique_ids],
+                dtype=np.float64,
+            )
+            return unique_values[inverse]
+
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
+        lo = int(unique_ids[0])
+        hi = int(unique_ids[-1])
+        span = hi - lo + 1
+
+        # A large/local ROI is much faster as one sequential time-window query
+        # than as dozens of IN-list statements.  Cap the absolute window and
+        # sparsity so a selection spread across a multi-million-cell mesh does
+        # not accidentally turn into a full-frame scan.
+        use_window = span <= max(500_000, int(unique_ids.size) * 8)
+        if use_window:
+            wanted = {int(cid): i for i, cid in enumerate(unique_ids.tolist())}
+            unique_values = np.full(unique_ids.size, np.nan, dtype=np.float64)
+            ds = None
+            try:
+                if self.session is not None and hasattr(self.session, "execute_raw_data_query"):
+                    ds = self.session.execute_raw_data_query(
+                        [f"{path}.{var}"], lo, hi + 1
+                    )
+                else:
+                    ds = self.query(
+                        f"SELECT {var} FROM {path} "
+                        f"WHERE Time >= {lo} AND Time <= {hi};"
+                    )
+                while ds.has_next():
+                    row = ds.next()
+                    pos = wanted.get(int(row.get_timestamp()))
+                    if pos is None:
+                        continue
+                    fields = row.get_fields()
+                    if fields:
+                        unique_values[pos] = _to_float(_field_to_value(fields[0]))
+                return unique_values[inverse]
+            except Exception:
+                # Older IoTDB clients/servers may not expose the raw range API
+                # with the same signature. Fall back to fewer, larger IN-list
+                # requests rather than the historical 5000-ID fragmentation.
+                pass
+            finally:
+                if ds is not None:
+                    close = getattr(ds, "close_operation_handle", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            pass
+
+        # Sparse large selections: keep exact semantics but reduce round trips.
+        out: Dict[int, float] = {}
+        chunk = 20_000
+        for start in range(0, unique_ids.size, chunk):
+            part = unique_ids[start:start + chunk]
+            idx = ",".join(str(int(i)) for i in part)
+            sql = f"SELECT {var} FROM {path} WHERE Time IN ({idx});"
+            for cid, vals in self.query_rows(sql):
+                if vals:
+                    out[int(cid)] = _to_float(vals[0])
+        unique_values = np.asarray(
+            [out.get(int(cid), np.nan) for cid in unique_ids], dtype=np.float64
+        )
+        return unique_values[inverse]
+
     def fetch_cell_ids_by_var_range(
         self,
         dataset_key: str,
