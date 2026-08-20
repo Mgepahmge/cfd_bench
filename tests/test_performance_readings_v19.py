@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cfd_bench.core.context import MeshContext
 from cfd_bench.infra.iotdb.config import IoTDBConfig
 from cfd_bench.infra.iotdb.repository import IoTDBRepository
-from cfd_bench.workloads.w2.run import _bench_iotdb_cfd
 from cfd_bench.workloads.w6.run import _bench_iotdb_native, _bench_pg_native
 from cfd_bench.workloads.w8 import run as w8_run
 
@@ -72,51 +72,86 @@ def test_iotdb_query_rows_closes_server_operation_handle():
     assert session.last_ds is not None and session.last_ds.closed
 
 
-def test_iotdb_w2_selection_uses_server_side_aggregates_not_raw_frame_reads(monkeypatch):
+def test_iotdb_numeric_query_uses_dataframe_batches_and_large_fetch_size():
+    class _DFDataSet:
+        def __init__(self):
+            self.frames = [
+                pd.DataFrame({"Time": [10, 11], "root.demo.P": [1.5, 2.5]}),
+                pd.DataFrame({"Time": [12], "root.demo.P": [3.5]}),
+            ]
+            self.index = 0
+            self.fetch_size = None
+            self.closed = False
+
+        def set_fetch_size(self, value):
+            self.fetch_size = int(value)
+
+        def has_next_df(self):
+            return self.index < len(self.frames)
+
+        def next_df(self):
+            frame = self.frames[self.index]
+            self.index += 1
+            return frame
+
+        def close_operation_handle(self):
+            self.closed = True
+
+    class _DFSession:
+        def __init__(self):
+            self.ds = None
+
+        def execute_query_statement(self, sql):
+            self.ds = _DFDataSet()
+            return self.ds
+
+    repo = IoTDBRepository(IoTDBConfig())
+    session = _DFSession()
+    repo.session = session
+    timestamps, values = repo.query_numeric_arrays("SELECT P FROM root.demo", 1)
+
+    assert timestamps.tolist() == [10, 11, 12]
+    assert values[:, 0].tolist() == [1.5, 2.5, 3.5]
+    assert session.ds.fetch_size == 50000
+    assert session.ds.closed
+
+
+def test_iotdb_dense_cell_selection_uses_one_bounded_time_scan(monkeypatch):
     repo = IoTDBRepository(IoTDBConfig())
     repo.resolve_cell_var_path = lambda *args, **kwargs: "root.demo.step_200.cell_vars"
     seen = []
 
-    def fake_query_rows(sql):
+    def fake_query(sql, value_count):
         seen.append(sql)
-        # COUNT, SUM, MIN_VALUE, MAX_VALUE
-        return [(0, ["4", "10.0", "1.0", "4.0"])]
+        # Return the complete enclosing range; repository must filter it back
+        # to the exact requested IDs and restore request order.
+        ts = np.arange(0, 999, dtype=np.int64)
+        return ts, ts.astype(np.float64).reshape(-1, 1)
 
-    monkeypatch.setattr(repo, "query_rows", fake_query_rows)
-    result = repo.aggregate_cell_scalar_selection(
-        "demo", 200, "P", np.array([10, 11, 12, 13], dtype=np.int32)
-    )
+    monkeypatch.setattr(repo, "query_numeric_arrays", fake_query)
+    ids = np.arange(0, 999, 2, dtype=np.int32)
+    requested = ids[::-1]
+    values = repo.fetch_cell_scalar_values("demo", 200, "P", requested)
 
-    assert result == (4, 10.0, 1.0, 4.0)
     assert len(seen) == 1
-    assert "COUNT(P)" in seen[0]
-    assert "SUM(P)" in seen[0]
-    assert "Time >= 10 AND Time <= 13" in seen[0]
-    assert "execute_raw_data_query" not in seen[0]
+    assert "Time >= 0 AND Time <= 998" in seen[0]
+    assert "Time IN" not in seen[0]
+    assert np.array_equal(values, requested.astype(np.float64))
 
 
-def test_iotdb_w2_cfd_benchmark_consumes_aggregate_callback():
-    calls = []
+def test_iotdb_contiguous_runs_are_compacted_instead_of_large_in_lists():
+    repo = IoTDBRepository(IoTDBConfig())
+    ids = []
+    for block in range(100):
+        base = block * 20
+        ids.extend(range(base, base + 10))
 
-    def coord_fn(lo, hi):
-        return np.array([1, 2, 3, 4], dtype=np.int32)
+    predicates = repo._selection_predicates(ids)
 
-    def aggregate_fn(cells, var, step):
-        calls.append((tuple(int(x) for x in cells), var, int(step)))
-        return 4, 10.0, 1.0, 4.0
-
-    _bench_iotdb_cfd(
-        coord_fn,
-        aggregate_fn,
-        [0, 1, 0, 1, 0, 1],
-        [200, 400],
-        0.005,
-        ["P"],
-        max_hit_attempts=1,
-    )
-
-    assert calls
-    assert {step for _cells, _var, step in calls} == {200, 400}
+    assert len(predicates) == 2
+    assert all(not needs_filter for _predicate, needs_filter in predicates)
+    assert all("Time IN" not in predicate for predicate, _ in predicates)
+    assert sum(predicate.count("Time >=") for predicate, _ in predicates) == 100
 
 
 class _W6PGClient:

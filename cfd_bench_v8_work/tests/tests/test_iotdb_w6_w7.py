@@ -107,12 +107,15 @@ def test_iotdb_boundary_face_reader_uses_persisted_cell_id_and_patch_code():
     repo = IoTDBRepository(IoTDBConfig())
     seen = []
 
-    def query_rows(sql):
+    def query_numeric_arrays(sql, value_count):
         seen.append(sql)
         # Time=123 is face-row id; persisted cell_id is 8.
-        return [(123, ["8", "0", "1", "0", "0", "2.5", "3", "4", "5"])]
+        return (
+            np.array([123], dtype=np.int64),
+            np.array([[8, 0, 1, 0, 0, 2.5, 3, 4, 5]], dtype=np.float64),
+        )
 
-    repo.query_rows = query_rows
+    repo.query_numeric_arrays = query_numeric_arrays
     rows = repo.fetch_boundary_faces("demo", "0_Wall_hull")
     assert "cell_id,patch_code" in seen[0]
     assert rows[0][0] == 8

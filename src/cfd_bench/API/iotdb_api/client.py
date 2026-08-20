@@ -142,11 +142,9 @@ class IoTDBMeshClient(AbstractContextManager):
     def point_query(self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None) -> np.ndarray:
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        scalar_map = self.repo.fetch_cell_scalar_map(
+        return self.repo.fetch_cell_scalar_values(
             ctx.dataset_key, ts, attribute_name, cell_indexes, zone=ctx.zone
         )
-        out = [scalar_map.get(int(cid), np.nan) for cid in cell_indexes]
-        return np.array(out, dtype=np.float64)
 
     def bulk_point_query(
         self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None
@@ -184,8 +182,7 @@ class IoTDBMeshClient(AbstractContextManager):
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
         ids = [int(cid) for cid in cell_indexes]
-        values = self.repo.fetch_velocity_map(ctx.dataset_key, ts, ids, zone=ctx.zone)
-        return np.asarray([values.get(cid, (np.nan, np.nan, np.nan)) for cid in ids], dtype=np.float64)
+        return self.repo.fetch_velocity_values(ctx.dataset_key, ts, ids, zone=ctx.zone)
 
     def range_query_var(
         self, lower_bound: float, upper_bound: float, attribute_name: str, step: Optional[int] = None

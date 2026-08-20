@@ -66,7 +66,19 @@ class IoTDBRepository:
                 "IoTDB backend requires apache-iotdb. "
                 "Install with: pip install 'cfd_bench[iotdb]'"
             ) from exc
-        self.session = Session(self.config.host, self.config.port, self.config.user, self.config.password)
+        try:
+            self.session = Session(
+                self.config.host,
+                self.config.port,
+                self.config.user,
+                self.config.password,
+                fetch_size=max(1024, int(self.config.query_fetch_size)),
+            )
+        except TypeError:
+            # Older apache-iotdb clients do not expose fetch_size in the
+            # constructor. Result-set level set_fetch_size() is still applied
+            # by query() below when available.
+            self.session = Session(self.config.host, self.config.port, self.config.user, self.config.password)
         self.session.open()
 
     def close(self):
@@ -107,7 +119,117 @@ class IoTDBRepository:
     def query(self, sql: str):
         if self.session is None:
             raise RuntimeError("IoTDB session is not open")
-        return self.session.execute_query_statement(sql)
+        ds = self.session.execute_query_statement(sql)
+        setter = getattr(ds, "set_fetch_size", None)
+        if callable(setter):
+            try:
+                setter(max(1024, int(self.config.query_fetch_size)))
+            except Exception:
+                pass
+        return ds
+
+    @staticmethod
+    def _close_dataset(ds) -> None:
+        close = getattr(ds, "close_operation_handle", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _frame_to_numeric_arrays(frame, value_count: int):
+        """Convert an IoTDB DataFrame batch into timestamp/value NumPy arrays.
+
+        Tree-model SessionDataSet DataFrames normally expose ``Time`` as the
+        first column.  Some client versions instead use it as the DataFrame
+        index.  Accept both layouts so the fast path remains version-tolerant.
+        """
+        if frame is None or len(frame) == 0:
+            return (
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0, int(value_count)), dtype=np.float64),
+            )
+        ncols = int(frame.shape[1])
+        value_count = int(value_count)
+        columns = [str(c).strip().lower() for c in list(frame.columns)]
+        time_col = None
+        for i, name in enumerate(columns):
+            leaf = name.rsplit(".", 1)[-1]
+            if leaf in {"time", "timestamp"}:
+                time_col = i
+                break
+
+        if time_col is not None:
+            timestamps = np.asarray(frame.iloc[:, time_col].to_numpy(), dtype=np.int64)
+            value_cols = [i for i in range(ncols) if i != time_col][:value_count]
+            values = np.asarray(frame.iloc[:, value_cols].to_numpy(), dtype=np.float64)
+        elif ncols == value_count + 1:
+            timestamps = np.asarray(frame.iloc[:, 0].to_numpy(), dtype=np.int64)
+            values = np.asarray(frame.iloc[:, 1 : 1 + value_count].to_numpy(), dtype=np.float64)
+        elif ncols >= value_count:
+            timestamps = np.asarray(frame.index.to_numpy(), dtype=np.int64)
+            values = np.asarray(frame.iloc[:, :value_count].to_numpy(), dtype=np.float64)
+        else:
+            raise ValueError(
+                f"unexpected IoTDB DataFrame shape {frame.shape} for {value_count} value columns"
+            )
+        if values.ndim == 1:
+            values = values.reshape(-1, 1)
+        return timestamps, values
+
+    def query_numeric_arrays(self, sql: str, value_count: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Read numeric query results with the fastest client API available.
+
+        IoTDB 2.0.8+ exposes streaming DataFrame batches specifically for
+        large query results.  Older clients transparently fall back to the
+        historical RowRecord iterator.  Both paths preserve the same query
+        semantics and always release the server-side operation handle.
+        """
+        ds = self.query(sql)
+        try:
+            has_next_df = getattr(ds, "has_next_df", None)
+            next_df = getattr(ds, "next_df", None)
+            if callable(has_next_df) and callable(next_df):
+                ts_parts: List[np.ndarray] = []
+                value_parts: List[np.ndarray] = []
+                while has_next_df():
+                    frame = next_df()
+                    if frame is None or len(frame) == 0:
+                        continue
+                    ts, vals = self._frame_to_numeric_arrays(frame, value_count)
+                    if ts.size:
+                        ts_parts.append(ts)
+                        value_parts.append(vals)
+                if not ts_parts:
+                    return (
+                        np.zeros((0,), dtype=np.int64),
+                        np.zeros((0, int(value_count)), dtype=np.float64),
+                    )
+                return np.concatenate(ts_parts), np.concatenate(value_parts, axis=0)
+
+            to_df = getattr(ds, "todf", None)
+            if callable(to_df) and int(value_count) <= 3:
+                frame = to_df()
+                return self._frame_to_numeric_arrays(frame, value_count)
+
+            timestamps: List[int] = []
+            values: List[List[float]] = []
+            while ds.has_next():
+                row = ds.next()
+                fields = row.get_fields()
+                if len(fields) < int(value_count):
+                    continue
+                timestamps.append(int(row.get_timestamp()))
+                values.append([_to_float(_field_to_value(fields[i])) for i in range(int(value_count))])
+            if not timestamps:
+                return (
+                    np.zeros((0,), dtype=np.int64),
+                    np.zeros((0, int(value_count)), dtype=np.float64),
+                )
+            return np.asarray(timestamps, dtype=np.int64), np.asarray(values, dtype=np.float64)
+        finally:
+            self._close_dataset(ds)
 
     def query_rows(self, sql: str) -> List[Tuple[int, List[str]]]:
         ds = self.query(sql)
@@ -122,12 +244,105 @@ class IoTDBRepository:
             # IoTDB query handles are server-side resources.  Leaving them
             # open across many benchmark transactions can progressively slow
             # later workloads in the same session/process.
-            close = getattr(ds, "close_operation_handle", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+            self._close_dataset(ds)
+
+    @staticmethod
+    def _time_runs(sorted_ids: np.ndarray) -> List[Tuple[int, int]]:
+        if sorted_ids.size == 0:
+            return []
+        cuts = np.flatnonzero(np.diff(sorted_ids) != 1) + 1
+        chunks = np.split(sorted_ids, cuts)
+        return [(int(chunk[0]), int(chunk[-1])) for chunk in chunks if chunk.size]
+
+    def _selection_predicates(self, cell_ids: Sequence[int]) -> List[Tuple[str, bool]]:
+        """Plan compact IoTDB time predicates for arbitrary cell-id selections.
+
+        The bool flag indicates that a predicate intentionally over-reads the
+        enclosing time window and therefore needs an exact NumPy membership
+        filter afterwards.
+        """
+        ids = np.unique(np.asarray(list(cell_ids), dtype=np.int64).reshape(-1))
+        if ids.size == 0:
+            return []
+        if ids.size <= 256:
+            return [("Time IN (" + ",".join(str(int(x)) for x in ids) + ")", False)]
+
+        runs = self._time_runs(ids)
+        if len(runs) <= 128:
+            predicates = []
+            for start in range(0, len(runs), 64):
+                terms = []
+                for lo, hi in runs[start : start + 64]:
+                    if lo == hi:
+                        terms.append(f"Time = {lo}")
+                    else:
+                        terms.append(f"(Time >= {lo} AND Time <= {hi})")
+                predicates.append((" OR ".join(terms), False))
+            return predicates
+
+        span = int(ids[-1]) - int(ids[0]) + 1
+        density = float(ids.size) / float(max(1, span))
+        # Sequential time scans are IoTDB's natural access pattern.  Once the
+        # selected IDs are moderately dense, one bounded scan plus a vectorized
+        # exact-membership filter is substantially cheaper than parsing a huge
+        # Time IN list.
+        estimated_in_queries = int((ids.size + 1999) // 2000)
+        if density >= 0.02 or (estimated_in_queries > 4 and span <= 5_000_000):
+            return [(f"Time >= {int(ids[0])} AND Time <= {int(ids[-1])}", True)]
+
+        predicates: List[Tuple[str, bool]] = []
+        chunk = 2000
+        for start in range(0, ids.size, chunk):
+            part = ids[start : start + chunk]
+            predicates.append(("Time IN (" + ",".join(str(int(x)) for x in part) + ")", False))
+        return predicates
+
+    @staticmethod
+    def _filter_exact_ids(
+        timestamps: np.ndarray, values: np.ndarray, wanted_sorted: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if timestamps.size == 0 or wanted_sorted.size == 0:
+            return timestamps[:0], values[:0]
+        pos = np.searchsorted(wanted_sorted, timestamps)
+        mask = pos < wanted_sorted.size
+        matched = np.zeros(mask.shape, dtype=bool)
+        if np.any(mask):
+            matched[mask] = wanted_sorted[pos[mask]] == timestamps[mask]
+        return timestamps[matched], values[matched]
+
+    def _fetch_selected_numeric(
+        self,
+        path: str,
+        fields: Sequence[str],
+        cell_ids: Sequence[int],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        wanted = np.unique(np.asarray(list(cell_ids), dtype=np.int64).reshape(-1))
+        if wanted.size == 0:
+            return (
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0, len(fields)), dtype=np.float64),
+            )
+        ts_parts: List[np.ndarray] = []
+        value_parts: List[np.ndarray] = []
+        select = ",".join(str(x) for x in fields)
+        for predicate, needs_filter in self._selection_predicates(wanted):
+            ts, values = self.query_numeric_arrays(
+                f"SELECT {select} FROM {path} WHERE {predicate};", len(fields)
+            )
+            if needs_filter:
+                ts, values = self._filter_exact_ids(ts, values, wanted)
+            if ts.size:
+                ts_parts.append(ts)
+                value_parts.append(values)
+        if not ts_parts:
+            return (
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0, len(fields)), dtype=np.float64),
+            )
+        ts = np.concatenate(ts_parts)
+        values = np.concatenate(value_parts, axis=0)
+        order = np.argsort(ts, kind="stable")
+        return ts[order], values[order]
 
     def resolve_cell_var_path(
         self, dataset_key: str, step: int, zone: str = "0_Fluid", probe_var: str = "P"
@@ -157,21 +372,38 @@ class IoTDBRepository:
         cell_ids: Sequence[int],
         zone: str = "0_Fluid",
     ) -> Dict[int, float]:
-        if cell_ids is None:
-            norm_ids: List[int] = []
-        else:
-            norm_ids = [int(i) for i in list(cell_ids)]
-        if len(norm_ids) == 0:
+        norm_ids = [] if cell_ids is None else [int(i) for i in list(cell_ids)]
+        if not norm_ids:
             return {}
         path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
-        out: Dict[int, float] = {}
-        for start in range(0, len(norm_ids), 5000):
-            ids = norm_ids[start:start + 5000]
-            idx = ",".join(str(i) for i in ids)
-            sql = f"SELECT {var} FROM {path} WHERE Time IN ({idx});"
-            for cid, vals in self.query_rows(sql):
-                if vals:
-                    out[int(cid)] = _to_float(vals[0])
+        ts, values = self._fetch_selected_numeric(path, [var], norm_ids)
+        return {int(cid): float(value) for cid, value in zip(ts, values[:, 0])}
+
+    def fetch_cell_scalar_values(
+        self,
+        dataset_key: str,
+        step: int,
+        var: str,
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
+    ) -> np.ndarray:
+        """Return scalar values aligned with the requested cell-id order."""
+        ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
+        if ids.size == 0:
+            return np.zeros((0,), dtype=np.float64)
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
+        ts, values = self._fetch_selected_numeric(path, [var], ids)
+        out = np.full(ids.shape, np.nan, dtype=np.float64)
+        if ts.size:
+            order = np.argsort(ts, kind="stable")
+            sorted_ts = ts[order]
+            sorted_values = values[order, 0]
+            pos = np.searchsorted(sorted_ts, ids)
+            mask = pos < sorted_ts.size
+            if np.any(mask):
+                exact = np.zeros(mask.shape, dtype=bool)
+                exact[mask] = sorted_ts[pos[mask]] == ids[mask]
+                out[exact] = sorted_values[pos[exact]]
         return out
 
     def fetch_cell_scalar_values_contiguous(
@@ -190,39 +422,8 @@ class IoTDBRepository:
         commonly dense 0..N-1 ranges, where one normal SELECT is sufficient.
         Sparse selections fall back to the established point-query path.
         """
-        ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
-        if ids.size == 0:
-            return np.zeros((0,), dtype=np.float64)
-        unique = np.unique(ids)
-        contiguous = (
-            unique.size == ids.size
-            and int(unique[-1]) - int(unique[0]) + 1 == unique.size
-        )
-        if not contiguous:
-            values = self.fetch_cell_scalar_map(
-                dataset_key, step, var, ids.tolist(), zone=zone
-            )
-            return np.asarray(
-                [values.get(int(cid), np.nan) for cid in ids], dtype=np.float64
-            )
-
-        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
-        lo, hi = int(ids[0]), int(ids[-1])
-        rows = self.query_rows(
-            f"SELECT {var} FROM {path} WHERE Time >= {lo} AND Time <= {hi};"
-        )
-        if len(rows) == ids.size and all(int(cid) == int(expected) for (cid, _), expected in zip(rows, ids)):
-            return np.asarray(
-                [_to_float(vals[0]) if vals else np.nan for _, vals in rows],
-                dtype=np.float64,
-            )
-        mapping = {
-            int(cid): _to_float(vals[0])
-            for cid, vals in rows
-            if vals
-        }
-        return np.asarray(
-            [mapping.get(int(cid), np.nan) for cid in ids], dtype=np.float64
+        return self.fetch_cell_scalar_values(
+            dataset_key, step, var, cell_ids, zone=zone
         )
 
     def aggregate_cell_scalar_selection(
@@ -323,7 +524,8 @@ class IoTDBRepository:
             f"SELECT {var} FROM {path} "
             f"WHERE {var} >= {float(lower)} AND {var} <= {float(upper)};"
         )
-        return [cid for cid, _ in self.query_rows(sql)]
+        timestamps, _ = self.query_numeric_arrays(sql, 1)
+        return timestamps.astype(np.int64, copy=False).tolist()
 
     def fetch_velocity_map(
         self,
@@ -336,23 +538,35 @@ class IoTDBRepository:
         if not norm_ids:
             return {}
         path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var="U")
-        # Large ROIs can make a single ``Time IN (...)`` query too long for
-        # some IoTDB server/client versions.  Chunking also makes W7's halo
-        # expansion safe on large CFD meshes without changing the schema.
-        out: Dict[int, Tuple[float, float, float]] = {}
-        chunk = 5000
-        for start in range(0, len(norm_ids), chunk):
-            ids = norm_ids[start : start + chunk]
-            idx = ",".join(str(i) for i in ids)
-            sql = f"SELECT U,V,W FROM {path} WHERE Time IN ({idx});"
-            for cid, vals in self.query_rows(sql):
-                if len(vals) < 3:
-                    continue
-                out[int(cid)] = (
-                    _to_float(vals[0]),
-                    _to_float(vals[1]),
-                    _to_float(vals[2]),
-                )
+        ts, values = self._fetch_selected_numeric(path, ["U", "V", "W"], norm_ids)
+        return {
+            int(cid): (float(row[0]), float(row[1]), float(row[2]))
+            for cid, row in zip(ts, values)
+        }
+
+    def fetch_velocity_values(
+        self,
+        dataset_key: str,
+        step: int,
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
+    ) -> np.ndarray:
+        ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
+        if ids.size == 0:
+            return np.zeros((0, 3), dtype=np.float64)
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var="U")
+        ts, values = self._fetch_selected_numeric(path, ["U", "V", "W"], ids)
+        out = np.full((ids.size, 3), np.nan, dtype=np.float64)
+        if ts.size:
+            order = np.argsort(ts, kind="stable")
+            sorted_ts = ts[order]
+            sorted_values = values[order]
+            pos = np.searchsorted(sorted_ts, ids)
+            mask = pos < sorted_ts.size
+            if np.any(mask):
+                exact = np.zeros(mask.shape, dtype=bool)
+                exact[mask] = sorted_ts[pos[mask]] == ids[mask]
+                out[exact] = sorted_values[pos[exact]]
         return out
 
     # -------------------- mesh static --------------------
@@ -376,31 +590,23 @@ class IoTDBRepository:
         parts_maxs = []
         parts_types = []
 
-        def consume(rows):
-            good = [(cid, vals) for cid, vals in rows if len(vals) >= 10]
-            if not good:
+        def consume(sql):
+            ids, values = self.query_numeric_arrays(sql, 10)
+            if ids.size == 0:
                 return
-            parts_ids.append(np.fromiter((int(cid) for cid, _ in good), dtype=np.int64, count=len(good)))
-            parts_centers.append(np.asarray([
-                [_to_float(v[0]), _to_float(v[1]), _to_float(v[2])] for _, v in good
-            ], dtype=np.float64))
-            parts_mins.append(np.asarray([
-                [_to_float(v[3]), _to_float(v[5]), _to_float(v[7])] for _, v in good
-            ], dtype=np.float64))
-            parts_maxs.append(np.asarray([
-                [_to_float(v[4]), _to_float(v[6]), _to_float(v[8])] for _, v in good
-            ], dtype=np.float64))
-            parts_types.append(np.fromiter((_to_int(v[9], 0) for _, v in good), dtype=np.int32, count=len(good)))
+            parts_ids.append(ids.astype(np.int64, copy=False))
+            parts_centers.append(np.ascontiguousarray(values[:, 0:3], dtype=np.float64))
+            parts_mins.append(np.ascontiguousarray(values[:, [3, 5, 7]], dtype=np.float64))
+            parts_maxs.append(np.ascontiguousarray(values[:, [4, 6, 8]], dtype=np.float64))
+            parts_types.append(np.asarray(values[:, 9], dtype=np.int32))
 
         if cell_count is None or cell_count <= 0:
-            consume(self.query_rows(f"SELECT {fields} FROM {path};"))
+            consume(f"SELECT {fields} FROM {path};")
         else:
             chunk = 50000
             for start in range(0, cell_count, chunk):
                 end = start + chunk
-                consume(self.query_rows(
-                    f"SELECT {fields} FROM {path} WHERE Time >= {start} AND Time < {end};"
-                ))
+                consume(f"SELECT {fields} FROM {path} WHERE Time >= {start} AND Time < {end};")
 
         if not parts_ids:
             return (
@@ -483,7 +689,11 @@ class IoTDBRepository:
 
     def fetch_nodes(self, dataset_key: str, zone: str) -> Dict[int, Tuple[float, float, float]]:
         sql = f"SELECT x,y,z FROM {self.path_mesh_static(dataset_key, zone, 'nodes')};"
-        return {nid: (_to_float(v[0]), _to_float(v[1]), _to_float(v[2])) for nid, v in self.query_rows(sql)}
+        ids, values = self.query_numeric_arrays(sql, 3)
+        return {
+            int(nid): (float(row[0]), float(row[1]), float(row[2]))
+            for nid, row in zip(ids, values)
+        }
 
     def fetch_mesh_meta(self, dataset_key: str, zone: str) -> Dict[str, float]:
         path = self.path_mesh_static(dataset_key, zone, "mesh_meta")
@@ -505,14 +715,11 @@ class IoTDBRepository:
         if not ids:
             return {}
         path = self.path_mesh_static(dataset_key, zone, "nodes")
-        out = {}
-        for start in range(0, len(ids), 5000):
-            chunk = ids[start:start + 5000]
-            idx = ",".join(str(x) for x in chunk)
-            for nid, vals in self.query_rows(f"SELECT x,y,z FROM {path} WHERE Time IN ({idx});"):
-                if len(vals) >= 3:
-                    out[int(nid)] = (_to_float(vals[0]), _to_float(vals[1]), _to_float(vals[2]))
-        return out
+        ts, values = self._fetch_selected_numeric(path, ["x", "y", "z"], ids)
+        return {
+            int(nid): (float(row[0]), float(row[1]), float(row[2]))
+            for nid, row in zip(ts, values)
+        }
 
     def fetch_cell_nodes_subset(
         self, dataset_key: str, zone: str, cell_ids: Sequence[int]
@@ -521,15 +728,13 @@ class IoTDBRepository:
         if not ids:
             return {}
         width = self._mesh_meta_int(dataset_key, zone, "max_nodes_per_cell", 16)
-        fields = ",".join(f"node_id_{i}" for i in range(width))
+        field_names = [f"node_id_{i}" for i in range(width)]
         path = self.path_mesh_static(dataset_key, zone, "cell_nodes")
+        ts, values = self._fetch_selected_numeric(path, field_names, ids)
         out = {}
-        for start in range(0, len(ids), 5000):
-            chunk = ids[start:start + 5000]
-            idx = ",".join(str(x) for x in chunk)
-            for cid, vals in self.query_rows(f"SELECT {fields} FROM {path} WHERE Time IN ({idx});"):
-                row = [_to_int(v, -1) for v in vals]
-                out[int(cid)] = [x for x in row if x >= 0]
+        rows = np.asarray(values, dtype=np.int64)
+        for cid, row in zip(ts, rows):
+            out[int(cid)] = row[row >= 0].astype(np.int64, copy=False).tolist()
         return out
 
     def _mesh_meta_int(self, dataset_key: str, zone: str, field: str, default: int) -> int:
@@ -545,26 +750,27 @@ class IoTDBRepository:
 
     def fetch_cell_nodes(self, dataset_key: str, zone: str) -> Dict[int, List[int]]:
         width = self._mesh_meta_int(dataset_key, zone, "max_nodes_per_cell", 16)
-        fields = ",".join(f"node_id_{i}" for i in range(width))
-        sql = f"SELECT {fields} FROM {self.path_mesh_static(dataset_key, zone, 'cell_nodes')};"
+        fields = [f"node_id_{i}" for i in range(width)]
+        sql = f"SELECT {','.join(fields)} FROM {self.path_mesh_static(dataset_key, zone, 'cell_nodes')};"
         out: Dict[int, List[int]] = {}
-        for cid, vals in self.query_rows(sql):
-            ids = [_to_int(v, -1) for v in vals]
-            out[cid] = [x for x in ids if x >= 0]
+        ts, values = self.query_numeric_arrays(sql, width)
+        rows = np.asarray(values, dtype=np.int64)
+        for cid, row in zip(ts, rows):
+            out[int(cid)] = row[row >= 0].astype(np.int64, copy=False).tolist()
         return out
 
     def fetch_cell_adjacency(self, dataset_key: str, zone: str) -> Dict[int, List[int]]:
         width = self._mesh_meta_int(dataset_key, zone, "max_neighbors_per_cell", 16)
-        fields = ",".join(f"neighbor_id_{i}" for i in range(width))
-        sql = f"SELECT {fields} FROM {self.path_mesh_static(dataset_key, zone, 'cell_adjacency')};"
+        fields = [f"neighbor_id_{i}" for i in range(width)]
+        sql = f"SELECT {','.join(fields)} FROM {self.path_mesh_static(dataset_key, zone, 'cell_adjacency')};"
         out: Dict[int, List[int]] = {}
         try:
-            rows = self.query_rows(sql)
+            ts, values = self.query_numeric_arrays(sql, width)
         except Exception:
             return out
-        for cid, vals in rows:
-            ids = [_to_int(v, -1) for v in vals]
-            out[cid] = [x for x in ids if x >= 0]
+        rows = np.asarray(values, dtype=np.int64)
+        for cid, row in zip(ts, rows):
+            out[int(cid)] = row[row >= 0].astype(np.int64, copy=False).tolist()
         return out
 
     def fetch_face_planes(self, dataset_key: str, zone: str) -> Dict[int, List[Tuple[int, float, float, float, float]]]:
@@ -593,15 +799,13 @@ class IoTDBRepository:
         path = self.path_mesh_static(dataset_key, zone, "boundary_faces")
         sql = f"SELECT cell_id,patch_code,nx,ny,nz,area,cx,cy,cz FROM {path};"
         try:
-            rows = self.query_rows(sql)
+            _face_ids, values = self.query_numeric_arrays(sql, 9)
         except Exception:
             return []
         out: List[Tuple[int, float, float, float, float, float, float, float, float]] = []
-        for _face_row, vals in rows:
-            if len(vals) < 9:
-                continue
-            cid = _to_int(vals[0], -1)
-            patch_code = _to_float(vals[1], 0.0)
+        for vals in values:
+            cid = int(vals[0])
+            patch_code = float(vals[1])
             if cid < 0:
                 continue
             if patch_name != "*":
@@ -616,13 +820,13 @@ class IoTDBRepository:
                 (
                     cid,
                     patch_code,
-                    _to_float(vals[2]),
-                    _to_float(vals[3]),
-                    _to_float(vals[4]),
-                    _to_float(vals[5]),
-                    _to_float(vals[6]),
-                    _to_float(vals[7]),
-                    _to_float(vals[8]),
+                    float(vals[2]),
+                    float(vals[3]),
+                    float(vals[4]),
+                    float(vals[5]),
+                    float(vals[6]),
+                    float(vals[7]),
+                    float(vals[8]),
                 )
             )
         return out

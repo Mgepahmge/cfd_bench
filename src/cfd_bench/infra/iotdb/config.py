@@ -11,6 +11,9 @@ class IoTDBConfig:
     user: str = field(default_factory=lambda: os.getenv("CFD_BENCH_IOTDB_USER", "root"))
     password: str = field(default_factory=lambda: os.getenv("CFD_BENCH_IOTDB_PASSWORD", "root"))
     root_path: str = field(default_factory=lambda: os.getenv("CFD_BENCH_IOTDB_ROOT_PATH", "root.simulation_data"))
+    query_fetch_size: int = field(
+        default_factory=lambda: int(os.getenv("CFD_BENCH_IOTDB_FETCH_SIZE", "50000"))
+    )
     max_cache_entries: int = 16
     bbox_eps: float = 1e-9
     line_eps: float = 1e-9

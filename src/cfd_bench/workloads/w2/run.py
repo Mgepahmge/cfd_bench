@@ -54,67 +54,6 @@ def _bench(label, coord_fn, scalar_fn, bounds, steps, duration, variables, *, ma
     )
 
 
-def _bench_iotdb_cfd(
-    coord_fn, aggregate_fn, bounds, steps, duration, variables, *,
-    max_hit_attempts=16, progress=False, progress_interval=5.0,
-):
-    """W2 CFD path with aggregation pushed into IoTDB.
-
-    The workload still selects the same coordinate ROI, variable and timesteps
-    and computes the same mean/max/min.  Only the transfer shape changes: IoTDB
-    returns four aggregate scalars per exact-ID chunk instead of materializing
-    every selected cell value in Python.
-    """
-    txn = 0
-    t0 = time.time()
-    with benchmark_progress("IoTDB W2", duration, enabled=progress, interval=progress_interval) as prog:
-        while time.time() - t0 < duration:
-            var = random.choice(variables)
-            attempts = 0
-            cells = np.zeros((0,), dtype=np.int32)
-            while True:
-                prog.set_phase("coordinate range query")
-                lo, hi = random_coord_range(bounds)
-                cells = coord_fn(lo, hi)
-                attempts += 1
-                if len(cells) > 0 or attempts >= int(max_hit_attempts):
-                    break
-            if len(cells) == 0:
-                txn += 1
-                prog.transaction()
-                continue
-
-            total_count = 0
-            total_sum = 0.0
-            total_min = np.inf
-            total_max = -np.inf
-            for step in steps:
-                prog.set_phase(f"aggregate query {var} step={step} ({len(cells)} cells)")
-                count, subtotal, vmin, vmax = aggregate_fn(cells, var, step)
-                if int(count) <= 0:
-                    continue
-                total_count += int(count)
-                total_sum += float(subtotal)
-                if np.isfinite(vmin):
-                    total_min = min(total_min, float(vmin))
-                if np.isfinite(vmax):
-                    total_max = max(total_max, float(vmax))
-            prog.set_phase("aggregation")
-            if total_count > 0:
-                # Compute the exact W2 outputs (mean, max, min).  They are not
-                # printed by the historical benchmark but remain part of the
-                # transaction's work.
-                _ = (total_sum / total_count, total_max, total_min)
-            txn += 1
-            prog.transaction()
-    emit_benchmark_result(
-        f"IoTDB W2: {txn} txns in {duration}s",
-        backend="IoTDB", operation="coordinate_range_multi_step",
-        transactions=txn, duration_sec=duration,
-        details=f"steps={','.join(str(s) for s in steps)}",
-    )
-
-
 def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
     steps = cfg.valid_steps(ship)
     shared_bounds = None
@@ -154,15 +93,14 @@ def run_ship(cfg: WorkloadConfig, ship: str, backends: set):
                     progress_interval=cfg.progress_interval_sec,
                 )
             else:
-                def iot_aggregate(cells, var, step):
+                def iot_scalar(cells, var, step):
                     iotdb.ctx.step = int(step)
-                    return iotdb.aggregate_point_query(cells, var, step=step)
+                    return iotdb.point_query(cells, var, step=step)
 
-                _bench_iotdb_cfd(
-                    geom.range_query_coord, iot_aggregate, bounds, steps,
-                    cfg.duration_sec, cfg.valid_variables(ship),
-                    max_hit_attempts=16, progress=cfg.progress,
-                    progress_interval=cfg.progress_interval_sec,
+                _bench(
+                    "IoTDB", geom.range_query_coord, iot_scalar, bounds, steps,
+                    cfg.duration_sec, cfg.valid_variables(ship), max_hit_attempts=16,
+                    progress=cfg.progress, progress_interval=cfg.progress_interval_sec,
                 )
         iotdb.close()
 
