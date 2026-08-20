@@ -31,6 +31,7 @@ class PostgreSQLMeshClient:
         self._centroids_cache: Optional[Dict] = None
         self._var_range_cache: Dict[Tuple[int, str], Tuple[float, float]] = {}
         self._surface_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._w6_temp_normals_ready = False
         self._qc_centroids_cache: Optional[Dict] = None
         self._qc_neighbors_cache: Optional[Dict] = None
         self._cfd_node_cell_csr: Optional[NodeCellCSR] = None
@@ -59,6 +60,7 @@ class PostgreSQLMeshClient:
         self._centroids_cache = None
         self._var_range_cache.clear()
         self._surface_cache = None
+        self._w6_temp_normals_ready = False
         self._qc_centroids_cache = None
         self._qc_neighbors_cache = None
         self._cfd_node_cell_csr = None
@@ -75,6 +77,7 @@ class PostgreSQLMeshClient:
         self._centroids_cache = None
         self._var_range_cache.clear()
         self._surface_cache = None
+        self._w6_temp_normals_ready = False
         self._qc_centroids_cache = None
         self._qc_neighbors_cache = None
         self._cfd_node_cell_csr = None
@@ -283,6 +286,85 @@ class PostgreSQLMeshClient:
             mapping = {int(cid): float(value) for cid, value in rows}
             return np.asarray([mapping.get(int(cid), np.nan) for cid in ids], dtype=np.float64)
         return np.asarray([float(r[1]) for r in rows], dtype=np.float64)
+
+    def prepare_surface_force_query(self) -> bool:
+        """Materialize static CFD W6 normals in a connection-local temp table."""
+        self._ensure_inner()
+        cells, normals = self.surface_cells_and_normals()
+        if len(cells) == 0 or len(normals) == 0:
+            self._w6_temp_normals_ready = False
+            return False
+        n = min(len(cells), len(normals))
+        cell_ids = [int(x) for x in np.asarray(cells[:n], dtype=np.int64)]
+        nx = [float(x) for x in np.asarray(normals[:n, 0], dtype=np.float64)]
+        ny = [float(x) for x in np.asarray(normals[:n, 1], dtype=np.float64)]
+        nz = [float(x) for x in np.asarray(normals[:n, 2], dtype=np.float64)]
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """CREATE TEMP TABLE IF NOT EXISTS cfd_bench_w6_normals (
+                       cell_id INTEGER PRIMARY KEY,
+                       nx DOUBLE PRECISION NOT NULL,
+                       ny DOUBLE PRECISION NOT NULL,
+                       nz DOUBLE PRECISION NOT NULL
+                   ) ON COMMIT PRESERVE ROWS"""
+            )
+            cur.execute("TRUNCATE cfd_bench_w6_normals")
+            cur.execute(
+                """INSERT INTO cfd_bench_w6_normals(cell_id,nx,ny,nz)
+                   SELECT * FROM UNNEST(%s::integer[], %s::double precision[],
+                                        %s::double precision[], %s::double precision[])""",
+                (cell_ids, nx, ny, nz),
+            )
+            self._w6_temp_normals_ready = True
+            return True
+        except Exception:
+            self._inner.conn.rollback()
+            self._w6_temp_normals_ready = False
+            return False
+        finally:
+            cur.close()
+
+    def surface_force_query(
+        self, attribute_name: str, step: Optional[int] = None
+    ) -> Optional[np.ndarray]:
+        """Compute one CFD W6 transaction as a PostgreSQL SUM join.
+
+        Static normals are prepared once before the timed loop in a temporary
+        table.  Each transaction therefore reads the selected scalar rows and
+        returns only three force components.  No persistent schema/ingest
+        change is required.
+        """
+        if not self._w6_temp_normals_ready:
+            return None
+        self._ensure_inner()
+        self._sync_timestep(step)
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        key = self._key
+        cur = self._inner.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT SUM(s.value * n.nx),
+                       SUM(s.value * n.ny),
+                       SUM(s.value * n.nz)
+                FROM cell_scalar s
+                JOIN cfd_bench_w6_normals n ON n.cell_id=s.cell_id
+                WHERE s.ship_type=%s AND s.scale=%s AND s.zone_type=%s
+                  AND s.timestep=%s AND s.var=%s
+                """,
+                (
+                    key.ship, key.scale, key.zone, ts,
+                    str(attribute_name).upper(),
+                ),
+            )
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        if not row or row[0] is None:
+            return None
+        return np.asarray([float(row[0]), float(row[1]), float(row[2])], dtype=np.float64)
 
     def velocity_query(self, cell_indexes: Sequence[int], step: Optional[int] = None) -> np.ndarray:
         """Fetch U/V/W for cells with one SQL query instead of three point queries."""

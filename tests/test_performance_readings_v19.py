@@ -6,6 +6,7 @@ import pytest
 from cfd_bench.core.context import MeshContext
 from cfd_bench.infra.iotdb.config import IoTDBConfig
 from cfd_bench.infra.iotdb.repository import IoTDBRepository
+from cfd_bench.workloads.w2.run import _bench_iotdb_cfd
 from cfd_bench.workloads.w6.run import _bench_iotdb_native, _bench_pg_native
 from cfd_bench.workloads.w8 import run as w8_run
 
@@ -19,15 +20,15 @@ class _Field:
 
 
 class _Row:
-    def __init__(self, timestamp, value):
+    def __init__(self, timestamp, values):
         self.timestamp = int(timestamp)
-        self.value = value
+        self.values = list(values) if isinstance(values, (tuple, list)) else [values]
 
     def get_timestamp(self):
         return self.timestamp
 
     def get_fields(self):
-        return [_Field(self.value)]
+        return [_Field(v) for v in self.values]
 
 
 class _DataSet:
@@ -48,89 +49,119 @@ class _DataSet:
         self.closed = True
 
 
-class _RawSession:
-    def __init__(self):
+class _QuerySession:
+    def __init__(self, rows):
+        self.rows = list(rows)
         self.calls = []
+        self.last_ds = None
 
-    def execute_raw_data_query(self, paths, start, end):
-        self.calls.append((list(paths), int(start), int(end)))
-        return _DataSet(_Row(i, i * 0.5) for i in range(start, end))
+    def execute_query_statement(self, sql):
+        self.calls.append(sql)
+        self.last_ds = _DataSet(self.rows)
+        return self.last_ds
 
 
-def test_iotdb_large_bulk_scalar_uses_one_raw_time_window():
+def test_iotdb_query_rows_closes_server_operation_handle():
     repo = IoTDBRepository(IoTDBConfig())
-    session = _RawSession()
+    session = _QuerySession([_Row(0, 1.0)])
     repo.session = session
+
+    rows = repo.query_rows("SELECT P FROM root.demo")
+
+    assert rows == [(0, ["1.0"])]
+    assert session.last_ds is not None and session.last_ds.closed
+
+
+def test_iotdb_w2_selection_uses_server_side_aggregates_not_raw_frame_reads(monkeypatch):
+    repo = IoTDBRepository(IoTDBConfig())
     repo.resolve_cell_var_path = lambda *args, **kwargs: "root.demo.step_200.cell_vars"
+    seen = []
 
-    ids = np.arange(20_000, dtype=np.int32)
-    values = repo.fetch_cell_scalar_values_bulk("demo", 200, "P", ids)
+    def fake_query_rows(sql):
+        seen.append(sql)
+        # COUNT, SUM, MIN_VALUE, MAX_VALUE
+        return [(0, ["4", "10.0", "1.0", "4.0"])]
 
-    assert session.calls == [(["root.demo.step_200.cell_vars.P"], 0, 20_000)]
-    np.testing.assert_allclose(values[[0, 123, -1]], [0.0, 61.5, 9999.5])
+    monkeypatch.setattr(repo, "query_rows", fake_query_rows)
+    result = repo.aggregate_cell_scalar_selection(
+        "demo", 200, "P", np.array([10, 11, 12, 13], dtype=np.int32)
+    )
 
-
-class _PGCursor:
-    def __init__(self, owner):
-        self.owner = owner
-        self.rows = []
-
-    def execute(self, sql, params):
-        self.owner.sql = sql
-        self.owner.params = params
-        lo, hi = int(params[-2]), int(params[-1])
-        self.rows = [(i, float(i) + 0.25) for i in range(lo, hi + 1)]
-
-    def fetchall(self):
-        return list(self.rows)
-
-    def close(self):
-        pass
+    assert result == (4, 10.0, 1.0, 4.0)
+    assert len(seen) == 1
+    assert "COUNT(P)" in seen[0]
+    assert "SUM(P)" in seen[0]
+    assert "Time >= 10 AND Time <= 13" in seen[0]
+    assert "execute_raw_data_query" not in seen[0]
 
 
-class _PGConn:
-    def __init__(self):
-        self.sql = ""
-        self.params = None
+def test_iotdb_w2_cfd_benchmark_consumes_aggregate_callback():
+    calls = []
 
-    def cursor(self):
-        return _PGCursor(self)
+    def coord_fn(lo, hi):
+        return np.array([1, 2, 3, 4], dtype=np.int32)
 
+    def aggregate_fn(cells, var, step):
+        calls.append((tuple(int(x) for x in cells), var, int(step)))
+        return 4, 10.0, 1.0, 4.0
 
-class _PGInner:
-    def __init__(self):
-        self.conn = _PGConn()
-        self.timestep = 200
+    _bench_iotdb_cfd(
+        coord_fn,
+        aggregate_fn,
+        [0, 1, 0, 1, 0, 1],
+        [200, 400],
+        0.005,
+        ["P"],
+        max_hit_attempts=1,
+    )
 
-
-def test_postgresql_contiguous_bulk_scalar_uses_primary_key_range_scan():
-    pytest.importorskip("psycopg2")
-    from cfd_bench.API.postgresql_api.client import PostgreSQLMeshClient
-    from cfd_bench.core.context import DatasetKey
-
-    client = PostgreSQLMeshClient()
-    client._inner = _PGInner()
-    client._key = DatasetKey("Kvlcc", "351K_Small", "0_Symmetry_sym", 200)
-    client.ctx = MeshContext("Kvlcc_351K_Small", 200, "0_Symmetry_sym")
-
-    values = client.bulk_point_query(np.arange(8, dtype=np.int32), "P")
-
-    assert "cell_id BETWEEN" in client._inner.conn.sql
-    assert "ANY(" not in client._inner.conn.sql
-    np.testing.assert_allclose(values, np.arange(8, dtype=np.float64) + 0.25)
+    assert calls
+    assert {step for _cells, _var, step in calls} == {200, 400}
 
 
-class _W6Client:
+class _W6PGClient:
     def __init__(self):
         self.ctx = MeshContext("demo", 0, "surface")
-        self.bulk_calls = 0
+        self.prepare_calls = 0
+        self.force_calls = 0
+        self.point_calls = 0
+
+    def prepare_surface_force_query(self):
+        self.prepare_calls += 1
+        return True
+
+    def surface_force_query(self, var):
+        self.force_calls += 1
+        return np.array([1.0, 2.0, 3.0])
+
+    def surface_cells_and_normals(self):
+        return np.array([0, 1], dtype=np.int32), np.eye(2, 3, dtype=np.float64)
+
+    def point_query(self, cells, var):
+        self.point_calls += 1
+        return np.ones(len(cells), dtype=np.float64)
+
+
+def test_w6_pg_prepares_static_normals_then_aggregates_force_in_database():
+    pg = _W6PGClient()
+    _bench_pg_native(pg, "P", 0.005)
+
+    assert pg.prepare_calls == 1
+    assert pg.force_calls > 0
+    assert pg.point_calls == 0
+
+
+class _W6IoTDBClient:
+    def __init__(self):
+        self.ctx = MeshContext("demo", 0, "surface")
+        self.contiguous_calls = 0
         self.point_calls = 0
 
     def surface_cells_and_normals(self):
         return np.array([0, 1], dtype=np.int32), np.eye(2, 3, dtype=np.float64)
 
-    def bulk_point_query(self, cells, var):
-        self.bulk_calls += 1
+    def contiguous_point_query(self, cells, var):
+        self.contiguous_calls += 1
         return np.ones(len(cells), dtype=np.float64)
 
     def point_query(self, cells, var):
@@ -138,16 +169,16 @@ class _W6Client:
         return np.ones(len(cells), dtype=np.float64)
 
 
-def test_w6_pg_uses_bulk_scalar_but_iotdb_h5_can_keep_point_path():
-    pg = _W6Client()
-    _bench_pg_native(pg, "P", 0.01)
-    assert pg.bulk_calls > 0
-    assert pg.point_calls == 0
+def test_w6_iotdb_cfd_uses_one_contiguous_sql_path_but_h5_keeps_point_path():
+    cfd = _W6IoTDBClient()
+    _bench_iotdb_native(cfd, "P", 0.005, contiguous_scalar=True)
+    assert cfd.contiguous_calls > 0
+    assert cfd.point_calls == 0
 
-    h5 = _W6Client()
-    _bench_iotdb_native(h5, "U", 0.01, bulk_scalar=False)
+    h5 = _W6IoTDBClient()
+    _bench_iotdb_native(h5, "U", 0.005, contiguous_scalar=False)
     assert h5.point_calls > 0
-    assert h5.bulk_calls == 0
+    assert h5.contiguous_calls == 0
 
 
 class _VTKArray:
@@ -195,7 +226,7 @@ class _Cfg:
         return ["P"]
 
 
-def test_vtk_w8_passes_explicit_step_so_baseline_query_reloads_frame(monkeypatch):
+def test_vtk_w8_keeps_v19_file_backed_baseline_path(monkeypatch):
     seen = []
     monkeypatch.setattr(w8_run, "make_vtk", lambda *a, **k: _VTKW8Client(seen))
 

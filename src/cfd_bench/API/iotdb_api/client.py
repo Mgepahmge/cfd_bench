@@ -151,10 +151,31 @@ class IoTDBMeshClient(AbstractContextManager):
     def bulk_point_query(
         self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None
     ) -> np.ndarray:
-        """Opt-in large-selection scalar fetch used by W2/W6 CFD paths."""
+        """Compatibility wrapper for the historical exact-ID point query.
+
+        v19 routed this name through IoTDB's raw-data API; real-server testing
+        showed that path was substantially slower and could degrade later
+        workloads.  Keep the public helper but restore conservative semantics.
+        """
+        return self.point_query(cell_indexes, attribute_name, step=step)
+
+    def contiguous_point_query(
+        self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None
+    ) -> np.ndarray:
+        """One ordinary SQL range read for dense CFD cell intervals."""
         ctx = self._require_ctx()
         ts = ctx.step if step is None else int(step)
-        return self.repo.fetch_cell_scalar_values_bulk(
+        return self.repo.fetch_cell_scalar_values_contiguous(
+            ctx.dataset_key, ts, attribute_name, cell_indexes, zone=ctx.zone
+        )
+
+    def aggregate_point_query(
+        self, cell_indexes: Sequence[int], attribute_name: str, step: Optional[int] = None
+    ) -> Tuple[int, float, float, float]:
+        """Server-side COUNT/SUM/MIN/MAX for a selected CFD cell set."""
+        ctx = self._require_ctx()
+        ts = ctx.step if step is None else int(step)
+        return self.repo.aggregate_cell_scalar_selection(
             ctx.dataset_key, ts, attribute_name, cell_indexes, zone=ctx.zone
         )
 

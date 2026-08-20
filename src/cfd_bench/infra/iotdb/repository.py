@@ -112,11 +112,22 @@ class IoTDBRepository:
     def query_rows(self, sql: str) -> List[Tuple[int, List[str]]]:
         ds = self.query(sql)
         out: List[Tuple[int, List[str]]] = []
-        while ds.has_next():
-            row = ds.next()
-            fields = [_field_to_value(x) for x in row.get_fields()]
-            out.append((int(row.get_timestamp()), fields))
-        return out
+        try:
+            while ds.has_next():
+                row = ds.next()
+                fields = [_field_to_value(x) for x in row.get_fields()]
+                out.append((int(row.get_timestamp()), fields))
+            return out
+        finally:
+            # IoTDB query handles are server-side resources.  Leaving them
+            # open across many benchmark transactions can progressively slow
+            # later workloads in the same session/process.
+            close = getattr(ds, "close_operation_handle", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def resolve_cell_var_path(
         self, dataset_key: str, step: int, zone: str = "0_Fluid", probe_var: str = "P"
@@ -163,7 +174,7 @@ class IoTDBRepository:
                     out[int(cid)] = _to_float(vals[0])
         return out
 
-    def fetch_cell_scalar_values_bulk(
+    def fetch_cell_scalar_values_contiguous(
         self,
         dataset_key: str,
         step: int,
@@ -171,97 +182,132 @@ class IoTDBRepository:
         cell_ids: Sequence[int],
         zone: str = "0_Fluid",
     ) -> np.ndarray:
-        """High-throughput scalar fetch for large CFD cell selections.
+        """Read one contiguous CFD cell interval with ordinary IoTDB SQL.
 
-        W2/W6 can select tens of thousands of cells.  Building many
-        ``Time IN (...)`` statements is dominated by SQL parsing and network
-        round-trips in IoTDB.  For a large selection, query one contiguous
-        time window (using the native raw-data API when available) and keep
-        only the requested timestamps locally.  Small selections retain the
-        historical point-query path.
-
-        This helper is intentionally opt-in; existing workloads continue to
-        use :meth:`fetch_cell_scalar_map` unless their benchmark explicitly
-        requests the bulk path.
+        This is deliberately narrower than the v19 raw-data fast path.  The
+        latter performed badly on real IoTDB servers and could leave later
+        workloads under heavy server/client pressure.  W6 surface zones are
+        commonly dense 0..N-1 ranges, where one normal SELECT is sufficient.
+        Sparse selections fall back to the established point-query path.
         """
         ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
         if ids.size == 0:
             return np.zeros((0,), dtype=np.float64)
-
-        # Preserve duplicate/order semantics while doing the backend query on
-        # sorted unique IDs.
-        unique_ids, inverse = np.unique(ids, return_inverse=True)
-        if unique_ids.size <= 4096:
+        unique = np.unique(ids)
+        contiguous = (
+            unique.size == ids.size
+            and int(unique[-1]) - int(unique[0]) + 1 == unique.size
+        )
+        if not contiguous:
             values = self.fetch_cell_scalar_map(
-                dataset_key, step, var, unique_ids.tolist(), zone=zone
+                dataset_key, step, var, ids.tolist(), zone=zone
             )
-            unique_values = np.asarray(
-                [values.get(int(cid), np.nan) for cid in unique_ids],
-                dtype=np.float64,
+            return np.asarray(
+                [values.get(int(cid), np.nan) for cid in ids], dtype=np.float64
             )
-            return unique_values[inverse]
 
         path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
-        lo = int(unique_ids[0])
-        hi = int(unique_ids[-1])
-        span = hi - lo + 1
-
-        # A large/local ROI is much faster as one sequential time-window query
-        # than as dozens of IN-list statements.  Cap the absolute window and
-        # sparsity so a selection spread across a multi-million-cell mesh does
-        # not accidentally turn into a full-frame scan.
-        use_window = span <= max(500_000, int(unique_ids.size) * 8)
-        if use_window:
-            wanted = {int(cid): i for i, cid in enumerate(unique_ids.tolist())}
-            unique_values = np.full(unique_ids.size, np.nan, dtype=np.float64)
-            ds = None
-            try:
-                if self.session is not None and hasattr(self.session, "execute_raw_data_query"):
-                    ds = self.session.execute_raw_data_query(
-                        [f"{path}.{var}"], lo, hi + 1
-                    )
-                else:
-                    ds = self.query(
-                        f"SELECT {var} FROM {path} "
-                        f"WHERE Time >= {lo} AND Time <= {hi};"
-                    )
-                while ds.has_next():
-                    row = ds.next()
-                    pos = wanted.get(int(row.get_timestamp()))
-                    if pos is None:
-                        continue
-                    fields = row.get_fields()
-                    if fields:
-                        unique_values[pos] = _to_float(_field_to_value(fields[0]))
-                return unique_values[inverse]
-            except Exception:
-                # Older IoTDB clients/servers may not expose the raw range API
-                # with the same signature. Fall back to fewer, larger IN-list
-                # requests rather than the historical 5000-ID fragmentation.
-                pass
-            finally:
-                if ds is not None:
-                    close = getattr(ds, "close_operation_handle", None)
-                    if callable(close):
-                        try:
-                            close()
-                        except Exception:
-                            pass
-
-        # Sparse large selections: keep exact semantics but reduce round trips.
-        out: Dict[int, float] = {}
-        chunk = 20_000
-        for start in range(0, unique_ids.size, chunk):
-            part = unique_ids[start:start + chunk]
-            idx = ",".join(str(int(i)) for i in part)
-            sql = f"SELECT {var} FROM {path} WHERE Time IN ({idx});"
-            for cid, vals in self.query_rows(sql):
-                if vals:
-                    out[int(cid)] = _to_float(vals[0])
-        unique_values = np.asarray(
-            [out.get(int(cid), np.nan) for cid in unique_ids], dtype=np.float64
+        lo, hi = int(ids[0]), int(ids[-1])
+        rows = self.query_rows(
+            f"SELECT {var} FROM {path} WHERE Time >= {lo} AND Time <= {hi};"
         )
-        return unique_values[inverse]
+        if len(rows) == ids.size and all(int(cid) == int(expected) for (cid, _), expected in zip(rows, ids)):
+            return np.asarray(
+                [_to_float(vals[0]) if vals else np.nan for _, vals in rows],
+                dtype=np.float64,
+            )
+        mapping = {
+            int(cid): _to_float(vals[0])
+            for cid, vals in rows
+            if vals
+        }
+        return np.asarray(
+            [mapping.get(int(cid), np.nan) for cid in ids], dtype=np.float64
+        )
+
+    def aggregate_cell_scalar_selection(
+        self,
+        dataset_key: str,
+        step: int,
+        var: str,
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
+    ) -> Tuple[int, float, float, float]:
+        """Aggregate a selected CFD cell set inside IoTDB for W2.
+
+        W2 ultimately consumes only mean/max/min across the selected values.
+        Pulling every scalar row across the network is unnecessary.  This
+        method keeps the same selected cell IDs and performs COUNT/SUM/MIN/MAX
+        server-side in exact-ID chunks, then combines the partial aggregates.
+        No raw-data API or full-frame scan is used.
+        """
+        ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
+        if ids.size == 0:
+            return 0, 0.0, np.nan, np.nan
+        unique = np.unique(ids)
+        path = self.resolve_cell_var_path(dataset_key, step, zone=zone, probe_var=var)
+
+        total_count = 0
+        total_sum = 0.0
+        total_min = np.inf
+        total_max = -np.inf
+        chunk = 10_000
+        for start in range(0, unique.size, chunk):
+            part = unique[start:start + chunk]
+            if part.size == 0:
+                continue
+            contiguous = int(part[-1]) - int(part[0]) + 1 == part.size
+            if contiguous:
+                predicate = f"Time >= {int(part[0])} AND Time <= {int(part[-1])}"
+            else:
+                idx = ",".join(str(int(i)) for i in part)
+                predicate = f"Time IN ({idx})"
+            try:
+                rows = self.query_rows(
+                    f"SELECT COUNT({var}),SUM({var}),MIN_VALUE({var}),MAX_VALUE({var}) "
+                    f"FROM {path} WHERE {predicate};"
+                )
+            except Exception:
+                rows = []
+            if rows and len(rows[0][1]) >= 4:
+                vals = rows[0][1]
+                count = _to_int(vals[0], 0)
+                subtotal = _to_float(vals[1], 0.0)
+                vmin = _to_float(vals[2])
+                vmax = _to_float(vals[3])
+            else:
+                # Compatibility fallback for older IoTDB versions whose
+                # aggregation grammar differs.  Keep the fallback scoped to
+                # this chunk rather than reverting to a full-frame raw read.
+                values = self.fetch_cell_scalar_map(
+                    dataset_key, step, var, part.tolist(), zone=zone
+                )
+                arr = np.asarray(
+                    [values.get(int(cid), np.nan) for cid in part],
+                    dtype=np.float64,
+                )
+                arr = arr[np.isfinite(arr)]
+                count = int(arr.size)
+                subtotal = float(np.sum(arr)) if count else 0.0
+                vmin = float(np.min(arr)) if count else np.nan
+                vmax = float(np.max(arr)) if count else np.nan
+            if count <= 0:
+                continue
+            total_count += count
+            total_sum += subtotal
+            if np.isfinite(vmin):
+                total_min = min(total_min, vmin)
+            if np.isfinite(vmax):
+                total_max = max(total_max, vmax)
+
+        if total_count <= 0:
+            return 0, 0.0, np.nan, np.nan
+        return (
+            int(total_count),
+            float(total_sum),
+            float(total_min),
+            float(total_max),
+        )
 
     def fetch_cell_ids_by_var_range(
         self,

@@ -39,15 +39,34 @@ def _bench(label, norm_fn, pressure_fn, n_cells, duration, *, progress=False, pr
 
 def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=False, progress_interval=5.0):
     txn = 0
+    # Static boundary normals are setup work, analogous to the mesh/locator
+    # preparation already performed outside other timed workload loops.
+    prepare_force = getattr(client, "prepare_surface_force_query", None)
+    server_force_supported = bool(prepare_force()) if callable(prepare_force) else False
     t0 = time.time()
     with benchmark_progress("PG W6", duration, enabled=progress, interval=progress_interval) as prog:
         while time.time() - t0 < duration:
+            # CFD PostgreSQL stores both boundary geometry and cell scalars.
+            # Prefer one server-side force aggregation so a transaction does
+            # not transfer tens of thousands of pressure rows to Python.
+            if server_force_supported is not False:
+                prog.set_phase(f"database force aggregation {scalar_name}")
+                force = client.surface_force_query(scalar_name)
+                if force is not None:
+                    server_force_supported = True
+                    txn += 1
+                    prog.transaction()
+                    continue
+                server_force_supported = False
+
+            # Fallback for legacy/incomplete CFD zones without persisted
+            # boundary_face_geom.  Restore the proven v18 point-query path.
             prog.set_phase("surface cells + normals")
             cells, normals = client.surface_cells_and_normals()
             if len(cells) == 0 or len(normals) == 0:
                 break
             prog.set_phase(f"scalar query {scalar_name} ({len(cells)} cells)")
-            values = client.bulk_point_query(cells, scalar_name)
+            values = client.point_query(cells, scalar_name)
             n = min(len(normals), len(values))
             if n == 0:
                 break
@@ -61,8 +80,7 @@ def _bench_pg_native(client, scalar_name: str, duration: float, *, progress=Fals
         duration_sec=duration, details=f"zone={client.ctx.zone}; scalar={scalar_name}",
     )
 
-
-def _bench_iotdb_native(client, scalar_name: str, duration: float, *, bulk_scalar=False, progress=False, progress_interval=5.0):
+def _bench_iotdb_native(client, scalar_name: str, duration: float, *, contiguous_scalar=False, progress=False, progress_interval=5.0):
     """IoTDB-native W6 with explicit surface-cell ids.
 
     Legacy CFD boundary faces are stored as face rows whose owning cell ids are
@@ -80,8 +98,8 @@ def _bench_iotdb_native(client, scalar_name: str, duration: float, *, bulk_scala
                 break
             prog.set_phase(f"scalar query {scalar_name} ({len(cells)} cells)")
             values = (
-                client.bulk_point_query(cells, scalar_name)
-                if bulk_scalar
+                client.contiguous_point_query(cells, scalar_name)
+                if contiguous_scalar
                 else client.point_query(cells, scalar_name)
             )
             n = min(len(normals), len(values))
@@ -229,7 +247,7 @@ def run_ship_step(cfg: WorkloadConfig, ship: str, step: int, backends: set):
             iotdb, scalar_name = selected
             try:
                 _bench_iotdb_native(
-                    iotdb, scalar_name, cfg.duration_sec, bulk_scalar=not iot_h5,
+                    iotdb, scalar_name, cfg.duration_sec, contiguous_scalar=not iot_h5,
                     progress=cfg.progress, progress_interval=cfg.progress_interval_sec
                 )
             finally:
