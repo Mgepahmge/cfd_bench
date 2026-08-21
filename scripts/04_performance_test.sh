@@ -21,15 +21,28 @@ mkdir -p "$CFD_BENCH_DATA_ROOT"
 RESULT_CSV=$(mktemp "${TMPDIR:-/tmp}/cfd_bench_perf.XXXXXX.csv")
 trap 'rm -f "$RESULT_CSV"' EXIT
 
-if ! cfd-bench run \
+set +e
+PYTHONUNBUFFERED=1 cfd-bench run \
   --backend postgresql iotdb tiledb vtk \
   --workloads w2 w4 w5 w6 w8 \
   --duration "$DURATION" \
   --datasets "$DATASET" \
   --output "$RESULT_CSV" \
-  >/dev/null 2>&1; then
+  2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      *"Running w2 "*) echo "[performance] Running W2 ..." ;;
+      *"Running w4 "*) echo "[performance] Running W4 ..." ;;
+      *"Running w5 "*) echo "[performance] Running W5 ..." ;;
+      *"Running w6 "*) echo "[performance] Running W6 ..." ;;
+      *"Running w8 "*) echo "[performance] Running W8 ..." ;;
+    esac
+  done
+RUN_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [[ $RUN_STATUS -ne 0 ]]; then
   echo "Error: cfd-bench performance run failed." >&2
-  exit 1
+  exit "$RUN_STATUS"
 fi
 
 python3 - "$RESULT_CSV" <<'PY'
@@ -92,7 +105,7 @@ for key, by_backend in values.items():
     vtk = mean(by_backend["vtk"])
     db_avg = (pg + iotdb + tiledb) / 3.0
     ratio = math.inf if vtk == 0.0 else db_avg / vtk
-    rows.append((workload, operation, step, db_avg, vtk, ratio))
+    rows.append((workload, operation, step, ratio))
 
 if missing:
     for (workload, operation, step), absent in sorted(
@@ -113,16 +126,14 @@ if missing:
 
 rows.sort(key=lambda r: (workload_order[r[0]], step_sort_value(r[2]), r[1]))
 
-headers = ("workload", "operation", "step", "db_avg_txns/s", "vtk_txns/s", "db_avg/vtk")
+headers = ("workload", "operation", "step", "db_avg/vtk")
 formatted = []
-for workload, operation, step, db_avg, vtk, ratio in rows:
+for workload, operation, step, ratio in rows:
     formatted.append(
         (
             workload,
             operation,
             step or "-",
-            f"{db_avg:.6g}",
-            f"{vtk:.6g}",
             "inf" if math.isinf(ratio) else f"{ratio:.6g}",
         )
     )

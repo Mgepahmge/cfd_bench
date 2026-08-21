@@ -50,11 +50,12 @@ If `OUTPUT_CSV` is omitted, `cfd-bench run` is invoked without `--output`.
 ./scripts/04_performance_test.sh <DATASET>
 ```
 
-Runs W2/W4/W5/W6/W8 for 10 seconds on all four backends. The benchmark program's stdout/stderr is hidden. A temporary CSV is used internally and removed automatically.
+Runs W2/W4/W5/W6/W8 for 10 seconds on all four backends. The benchmark program's normal stdout/stderr is hidden. While it runs, the script prints only the current workload, for example `[performance] Running W4 ...`. A temporary CSV is used internally and removed automatically.
 
-For each matching `workload + operation + step`, the script prints:
+For each matching `workload + operation + step`, the final table reports only:
 
 ```text
-db_avg_txns/s = mean(PostgreSQL, IoTDB, TileDB txns/s)
-db_avg/vtk    = db_avg_txns/s / VTK txns/s
+db_avg/vtk = mean(PostgreSQL, IoTDB, TileDB txns/s) / VTK txns/s
 ```
+
+The identifying columns (`workload`, `operation`, `step`) are retained so each ratio can be matched to its benchmark case.
