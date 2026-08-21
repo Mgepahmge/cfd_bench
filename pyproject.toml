@@ -26,3 +26,8 @@ cfd-bench = "cfd_bench.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cfd_bench = [
+    "ingest/postgresql/sql/*.sql",
+]
