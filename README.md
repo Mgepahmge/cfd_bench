@@ -365,3 +365,35 @@ cfd-bench run \
 ```
 
 `--progress` reports elapsed time, completed transactions, and the current operation phase (for example `line intersection`, `scalar query U`, `extract submesh`, or `Q-criterion`). On an interactive terminal it renders a compact progress bar; redirected/non-interactive output uses ordinary heartbeat lines. The reporter is observational only: it does not create a new deadline, cancel a transaction, alter random inputs, or change the workload stop conditions. Leave it disabled for the cleanest throughput measurement.
+
+## IoTDB fluid linear interpolation mapping
+
+The standalone `interpolate` command maps legacy Tecplot CFD fields from
+Apache IoTDB to one or more target coordinates.  It is intentionally separate
+from W1-W11 and does not change the frozen benchmark/ingest contracts.
+
+```bash
+cfd-bench interpolate \
+  --datasets Kvlcc_351K_Small \
+  --step 200 \
+  --point -7.2 0.15 0.04 \
+  --variables U V W P
+```
+
+Repeat `--point X Y Z` to map several coordinates in one IoTDB session.  Omit
+`--variables` to use every CFD variable recorded in dataset metadata, and use
+`--zone` only when the default result zone is not appropriate.
+
+Legacy CFD DAT files store X/Y/Z at nodes but U/V/W/P/K/E at cell centers.  No
+schema change is required: the interpolation feature derives each containing
+cell vertex value at query time as the mean of all incident cell-centered
+values (the same runtime projection already used by CFD W11), then evaluates a
+piecewise-linear barycentric interpolation inside the cell.  For arbitrary
+convex FE cells, the implementation selects a numerically stable containing
+four-vertex simplex, so it does not depend on Tecplot local node ordering.
+Nothing is written back to IoTDB.
+
+The console result includes the containing dense cell / one-based Tecplot
+element ID, supporting dense / one-based node IDs, barycentric weights,
+coordinate reconstruction error, projected support values, interpolated
+physical quantities, and a final `validation=PASS|FAIL` geometry/result check.
