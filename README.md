@@ -393,7 +393,21 @@ convex FE cells, the implementation selects a numerically stable containing
 four-vertex simplex, so it does not depend on Tecplot local node ordering.
 Nothing is written back to IoTDB.
 
-The console result includes the containing dense cell / one-based Tecplot
-element ID, supporting dense / one-based node IDs, barycentric weights,
-coordinate reconstruction error, projected support values, interpolated
-physical quantities, and a final `validation=PASS|FAIL` geometry/result check.
+By default the result display is compact and only prints the target coordinate,
+interpolated physical quantities, and final `validation=PASS|FAIL` check.  The
+existing `[stage]` diagnostics are unchanged.
+
+```text
+target=(-7.2, 0.15, 0.04)
+interpolated_values:
+  U = 1.04963573718
+  V = 4.59100910371e-05
+  W = -9.89814120784e-05
+  P = 1.66150422718
+validation=PASS
+```
+
+Add `--verbose` to restore the full diagnostic result, including the containing
+dense cell / one-based Tecplot element ID, supporting dense / one-based node
+IDs, barycentric weights, coordinate reconstruction error, projected support
+values, and per-variable support values.

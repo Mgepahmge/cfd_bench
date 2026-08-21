@@ -43,6 +43,11 @@ def add_interpolate_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Override CFD result zone (default: dataset metadata zone)",
     )
+    ap.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show full interpolation diagnostics (default: compact result output)",
+    )
     ap.set_defaults(func=run_interpolate)
 
 
@@ -50,7 +55,27 @@ def _fmt_vector(values: Sequence[float]) -> str:
     return "(" + ", ".join(f"{float(x):.10g}" for x in values) + ")"
 
 
-def _print_result(index: int, result) -> None:
+def _result_passed(result) -> bool:
+    return bool(
+        np.isfinite(result.reconstruction_error)
+        and result.reconstruction_error <= 1.0e-7 * max(1.0, float(np.linalg.norm(result.target)))
+        and np.all(np.isfinite(result.weights))
+        and abs(float(np.sum(result.weights)) - 1.0) <= 1.0e-8
+        and all(np.isfinite(float(v)) for v in result.values.values())
+    )
+
+
+def _print_result(index: int, result, *, verbose: bool = False) -> None:
+    passed = _result_passed(result)
+
+    if not verbose:
+        print(f"target={_fmt_vector(result.target)}")
+        print("interpolated_values:")
+        for var, value in result.values.items():
+            print(f"  {var} = {float(value):.12g}")
+        print(f"validation={'PASS' if passed else 'FAIL'}")
+        return
+
     print(f"\n=== Fluid interpolation point {index} ===")
     print(f"dataset={result.dataset} step={result.step} zone={result.zone}")
     print(f"target={_fmt_vector(result.target)}")
@@ -68,13 +93,6 @@ def _print_result(index: int, result) -> None:
     for var, value in result.values.items():
         source = result.support_vertex_values.get(var, ())
         print(f"  {var} = {float(value):.12g}    support={_fmt_vector(source)}")
-    passed = (
-        np.isfinite(result.reconstruction_error)
-        and result.reconstruction_error <= 1.0e-7 * max(1.0, float(np.linalg.norm(result.target)))
-        and np.all(np.isfinite(result.weights))
-        and abs(float(np.sum(result.weights)) - 1.0) <= 1.0e-8
-        and all(np.isfinite(float(v)) for v in result.values.values())
-    )
     print(f"validation={'PASS' if passed else 'FAIL'}")
 
 
@@ -103,7 +121,7 @@ def run_interpolate(args: argparse.Namespace) -> int:
                     variables=args.variables,
                     zone=args.zone,
                 )
-                _print_result(i, result)
+                _print_result(i, result, verbose=bool(args.verbose))
         finally:
             repo.close()
     return 0

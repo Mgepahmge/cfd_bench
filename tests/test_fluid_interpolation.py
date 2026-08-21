@@ -129,3 +129,56 @@ def test_cli_registers_interpolate_without_changing_run_command():
     assert args.step == 200
     assert args.point == [[0.1, 0.2, 0.3]]
     assert args.variables == ["U", "P"]
+    assert args.verbose is False
+
+    verbose_args = parser.parse_args(
+        [
+            "interpolate",
+            "--datasets", "tiny_cfd",
+            "--step", "200",
+            "--point", "0.1", "0.2", "0.3",
+            "--verbose",
+        ]
+    )
+    assert verbose_args.verbose is True
+
+
+def test_interpolate_compact_output_is_default(capsys):
+    from cfd_bench.cli.interpolate_cmd import _print_result
+
+    result = FluidInterpolationEngine(_FakeRepo()).interpolate(
+        "tiny_cfd", 200, [0.2, 0.2, 0.2], variables=["P", "U"]
+    )
+    capsys.readouterr()  # discard [stage] output from the engine
+    _print_result(1, result)
+    text = capsys.readouterr().out
+
+    assert text == (
+        "target=(0.2, 0.2, 0.2)\n"
+        "interpolated_values:\n"
+        "  P = 7.5\n"
+        "  U = -2\n"
+        "validation=PASS\n"
+    )
+    assert "support=" not in text
+    assert "containing_cell=" not in text
+    assert "barycentric_weights=" not in text
+
+
+def test_interpolate_verbose_output_preserves_full_diagnostics(capsys):
+    from cfd_bench.cli.interpolate_cmd import _print_result
+
+    result = FluidInterpolationEngine(_FakeRepo()).interpolate(
+        "tiny_cfd", 200, [0.2, 0.2, 0.2], variables=["P"]
+    )
+    capsys.readouterr()
+    _print_result(1, result, verbose=True)
+    text = capsys.readouterr().out
+
+    assert "=== Fluid interpolation point 1 ===" in text
+    assert "dataset=tiny_cfd step=200 zone=0_Fluid" in text
+    assert "containing_cell=0 tecplot_element_id=1" in text
+    assert "support_node_ids(dense)=" in text
+    assert "barycentric_weights=" in text
+    assert "support=" in text
+    assert "validation=PASS" in text
