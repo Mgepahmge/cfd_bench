@@ -39,6 +39,11 @@ services:
       dn_seed_config_node: iotdb:10710
       schema_replication_factor: "1"
       data_replication_factor: "1"
+      # IoTDB defaults to 5% free-space protection. On large shared Docker
+      # filesystems that can mean tens/hundreds of GB are still free while the
+      # DataNode is forced into ReadOnly(DiskFull). Keep the guard enabled but
+      # make it tunable for this benchmark stack.
+      disk_space_warning_threshold: "${CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD:-0.01}"
     volumes:
       - iotdb-data:/iotdb/data
       - iotdb-logs:/iotdb/logs
@@ -80,6 +85,7 @@ services:
       CFD_BENCH_IOTDB_PASSWORD: root
       CFD_BENCH_IOTDB_ROOT_PATH: root.simulation_data
       CFD_BENCH_IOTDB_FETCH_SIZE: "50000"
+      CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD: "${CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD:-0.01}"
     depends_on:
       postgres:
         condition: service_healthy

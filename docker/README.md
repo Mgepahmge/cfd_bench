@@ -229,5 +229,39 @@ docker compose exec iotdb \
 A healthy standalone instance must contain a row whose status is `Running`.
 Only after that should ingest be started.
 
+### `ReadOnly(DiskFull)` during startup
+
+If `SHOW DATANODES` reports `ReadOnly(DiskFull)`, resetting the IoTDB volume is
+usually **not** the fix. IoTDB deliberately switches a DataNode to read-only
+when the filesystem free-space ratio drops below `disk_space_warning_threshold`
+(upstream default: `0.05`, i.e. 5%). Check the filesystem visible to the
+container and Docker's disk usage first:
+
+```bash
+docker compose exec iotdb df -h /iotdb/data /iotdb/logs
+docker system df
+```
+
+The benchmark Compose stack keeps the protection enabled but defaults the
+threshold to 1%, which is often more practical on large shared benchmark
+servers. Override it in `.env` when needed:
+
+```bash
+CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD=0.01
+```
+
+Then recreate IoTDB so the restart-required setting is applied:
+
+```bash
+docker compose up -d --force-recreate iotdb
+docker compose exec iotdb \
+  /iotdb/sbin/start-cli.sh -h iotdb -p 6667 -u root -pw root \
+  -e "show datanodes"
+```
+
+Do not reduce the threshold merely to hide a genuinely full disk. If the
+filesystem has little absolute free space, reclaim Docker images/build cache or
+move Docker's data root/IoTDB volumes to a larger filesystem instead.
+
 The Compose configuration also pins both replication factors to `1`, matching
 the intended one-ConfigNode/one-DataNode standalone deployment.

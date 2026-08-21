@@ -20,6 +20,10 @@ TIMEOUT = float(os.getenv("CFD_BENCH_SERVICE_WAIT_TIMEOUT", "300"))
 INTERVAL = 2.0
 
 
+class FatalServiceError(RuntimeError):
+    """A service state that retrying cannot repair on its own."""
+
+
 def wait_for(name, connect_once):
     deadline = time.monotonic() + TIMEOUT
     last_error = None
@@ -28,6 +32,9 @@ def wait_for(name, connect_once):
             connect_once()
             print(f"[docker] {name}: ready", flush=True)
             return
+        except FatalServiceError as exc:
+            print(f"[docker] {name}: fatal readiness error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
         except Exception as exc:  # service startup can fail in many transient ways
             last_error = exc
             time.sleep(INTERVAL)
@@ -79,14 +86,37 @@ def check_iotdb():
         session.open()
         dataset = session.execute_query_statement("SHOW DATANODES")
         running = False
+        statuses = []
         while dataset.has_next():
             row = dataset.next()
             values = [_field_text(field) for field in row.get_fields()]
-            if any(value.lower() == "running" for value in values):
+            lower_values = [value.lower() for value in values]
+            if any(value == "running" for value in lower_values):
                 running = True
                 break
+            statuses.extend(value for value in values if value)
+
         if not running:
-            raise RuntimeError("IoTDB RPC is reachable but no Running DataNode is registered")
+            normalized = " ".join(statuses).lower().replace(" ", "")
+            if "readonly(diskfull)" in normalized:
+                threshold = os.getenv(
+                    "CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD", "0.01"
+                )
+                raise FatalServiceError(
+                    "IoTDB DataNode is ReadOnly(DiskFull). IoTDB entered its "
+                    "disk-protection mode because the filesystem backing "
+                    "/iotdb/data or /iotdb/logs is below the configured free-space "
+                    f"threshold ({threshold}). On the host run: "
+                    "`docker compose exec iotdb df -h /iotdb/data /iotdb/logs` "
+                    "and `docker system df`. Free Docker/host disk space, or set "
+                    "CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD in .env and "
+                    "recreate IoTDB with `docker compose up -d --force-recreate iotdb`."
+                )
+            detail = ", ".join(statuses) if statuses else "no DataNode rows"
+            raise RuntimeError(
+                "IoTDB RPC is reachable but no Running DataNode is registered "
+                f"(SHOW DATANODES returned: {detail})"
+            )
     finally:
         if dataset is not None:
             try:
