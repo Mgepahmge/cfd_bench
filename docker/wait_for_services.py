@@ -3,6 +3,11 @@
 This executes in a short-lived Python process before the real command.  That
 also isolates any import-time warning-filter side effects from third-party
 clients (notably the IoTDB Python client) from the benchmark process itself.
+
+A TCP/RPC connection alone is not enough for IoTDB: during standalone startup
+the DataNode RPC port may already accept sessions before the DataNode has
+successfully registered with the ConfigNode.  We therefore require a
+``SHOW DATANODES`` row whose status is ``Running`` before releasing the app.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ import os
 import sys
 import time
 
-TIMEOUT = float(os.getenv("CFD_BENCH_SERVICE_WAIT_TIMEOUT", "180"))
+TIMEOUT = float(os.getenv("CFD_BENCH_SERVICE_WAIT_TIMEOUT", "300"))
 INTERVAL = 2.0
 
 
@@ -49,6 +54,16 @@ def check_postgres():
         conn.close()
 
 
+def _field_text(field):
+    if field is None:
+        return ""
+    try:
+        value = field.get_string_value()
+    except Exception:
+        value = str(field)
+    return "" if value is None else str(value).strip()
+
+
 def check_iotdb():
     from iotdb.Session import Session
 
@@ -59,9 +74,25 @@ def check_iotdb():
         os.getenv("CFD_BENCH_IOTDB_PASSWORD", "root"),
         fetch_size=int(os.getenv("CFD_BENCH_IOTDB_FETCH_SIZE", "50000")),
     )
+    dataset = None
     try:
         session.open()
+        dataset = session.execute_query_statement("SHOW DATANODES")
+        running = False
+        while dataset.has_next():
+            row = dataset.next()
+            values = [_field_text(field) for field in row.get_fields()]
+            if any(value.lower() == "running" for value in values):
+                running = True
+                break
+        if not running:
+            raise RuntimeError("IoTDB RPC is reachable but no Running DataNode is registered")
     finally:
+        if dataset is not None:
+            try:
+                dataset.close_operation_handle()
+            except Exception:
+                pass
         try:
             session.close()
         except Exception:
@@ -70,4 +101,4 @@ def check_iotdb():
 
 if __name__ == "__main__":
     wait_for("PostgreSQL/PostGIS", check_postgres)
-    wait_for("Apache IoTDB", check_iotdb)
+    wait_for("Apache IoTDB (Running DataNode)", check_iotdb)

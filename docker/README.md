@@ -5,7 +5,7 @@ separate containers while presenting them as one reproducible environment.
 
 ## What is included
 
-- `cfd-bench:v22.4.1`: CFD-Bench plus all Python backend dependencies, including
+- `cfd-bench:v22.4.2`: CFD-Bench plus all Python backend dependencies, including
   Apache IoTDB Python client 2.0.10, TileDB-Py, VTK, h5py, psycopg2, SciPy and
   tqdm.
 - `postgis/postgis:16-3.5`: PostgreSQL 16 + PostGIS 3.5.
@@ -145,16 +145,16 @@ On a machine with Docker and Internet access:
 ./docker/build_bundle.sh
 ```
 
-This creates `cfd-bench-docker-bundle-v22.4.1.tar.gz` containing:
+This creates `cfd-bench-docker-bundle-v22.4.2.tar.gz` containing:
 
-- `cfd-bench:v22.4.1`
+- `cfd-bench:v22.4.2`
 - `postgis/postgis:16-3.5`
 - `apache/iotdb:2.0.10-standalone`
 
 On another machine:
 
 ```bash
-./docker/load_bundle.sh cfd-bench-docker-bundle-v22.4.1.tar.gz
+./docker/load_bundle.sh cfd-bench-docker-bundle-v22.4.2.tar.gz
 docker compose up -d postgres iotdb
 ```
 
@@ -194,3 +194,40 @@ already running on the host.
 If you need host-side database access for debugging, add a temporary Compose
 override that publishes different host ports; the application container should
 still keep using `postgres:5432` and `iotdb:6667`.
+
+## IoTDB bootstrap validation and reset
+
+The IoTDB service is considered healthy only after `SHOW DATANODES` reports at
+least one DataNode in `Running` state. A listening RPC port alone is not enough:
+during a failed/partial standalone bootstrap the RPC endpoint can accept a
+session while the ConfigNode still has no registered DataNode, which makes
+writes fail with errors such as:
+
+```text
+DataNode is not enough, please register more. Current DataNodes: []
+```
+
+If this happens during the **first Docker setup**, reset only Docker-managed
+IoTDB state and start it again:
+
+```bash
+./docker/reset_iotdb.sh
+docker compose up -d iotdb
+docker compose ps
+```
+
+This reset does not touch PostgreSQL and does not touch host `./data`.
+
+Verify the registered DataNode directly:
+
+```bash
+docker compose exec iotdb \
+  /iotdb/sbin/start-cli.sh -h iotdb -p 6667 -u root -pw root \
+  -e "show datanodes"
+```
+
+A healthy standalone instance must contain a row whose status is `Running`.
+Only after that should ingest be started.
+
+The Compose configuration also pins both replication factors to `1`, matching
+the intended one-ConfigNode/one-DataNode standalone deployment.

@@ -418,3 +418,17 @@ A complete Docker Compose environment is provided in `compose.yaml`. It includes
 PostgreSQL/PostGIS, Apache IoTDB, and a CFD-Bench application image containing
 TileDB, VTK, H5 and all Python clients. See `docker/README.md` for build, ingest,
 benchmark and test-script commands.
+
+### Docker IoTDB first-start recovery
+
+Docker readiness now validates a registered `Running` IoTDB DataNode instead
+of only checking whether RPC port 6667 is open. If a previous failed bootstrap
+left the Docker IoTDB volume in a partial state, run:
+
+```bash
+./docker/reset_iotdb.sh
+docker compose up -d iotdb
+```
+
+The reset is scoped to the Docker IoTDB data/log volumes; PostgreSQL and the
+project `./data` directory are not modified.
