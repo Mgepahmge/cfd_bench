@@ -5,7 +5,7 @@ separate containers while presenting them as one reproducible environment.
 
 ## What is included
 
-- `cfd-bench:v22.4`: CFD-Bench plus all Python backend dependencies, including
+- `cfd-bench:v22.4.1`: CFD-Bench plus all Python backend dependencies, including
   Apache IoTDB Python client 2.0.10, TileDB-Py, VTK, h5py, psycopg2, SciPy and
   tqdm.
 - `postgis/postgis:16-3.5`: PostgreSQL 16 + PostGIS 3.5.
@@ -145,16 +145,16 @@ On a machine with Docker and Internet access:
 ./docker/build_bundle.sh
 ```
 
-This creates `cfd-bench-docker-bundle-v22.4.tar.gz` containing:
+This creates `cfd-bench-docker-bundle-v22.4.1.tar.gz` containing:
 
-- `cfd-bench:v22.4`
+- `cfd-bench:v22.4.1`
 - `postgis/postgis:16-3.5`
 - `apache/iotdb:2.0.10-standalone`
 
 On another machine:
 
 ```bash
-./docker/load_bundle.sh cfd-bench-docker-bundle-v22.4.tar.gz
+./docker/load_bundle.sh cfd-bench-docker-bundle-v22.4.1.tar.gz
 docker compose up -d postgres iotdb
 ```
 
@@ -184,20 +184,13 @@ docker compose down -v
 rm -rf data/* output/*
 ```
 
-## Host port conflicts
+## Database networking
 
-Container-to-container settings never change, but host port exposure can be
-changed through `.env`:
+PostgreSQL and IoTDB are intentionally **not published on host ports**.
+CFD-Bench connects through the private Compose network using `postgres:5432`
+and `iotdb:6667`. This avoids conflicts with PostgreSQL or IoTDB instances
+already running on the host.
 
-```bash
-cp .env.example .env
-```
-
-Then edit, for example:
-
-```text
-CFD_BENCH_PG_HOST_PORT=15432
-CFD_BENCH_IOTDB_HOST_PORT=16667
-```
-
-CFD-Bench will still connect internally to `postgres:5432` and `iotdb:6667`.
+If you need host-side database access for debugging, add a temporary Compose
+override that publishes different host ports; the application container should
+still keep using `postgres:5432` and `iotdb:6667`.
