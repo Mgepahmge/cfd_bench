@@ -44,7 +44,7 @@ services:
         soft: 1048576
         hard: 1048576
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/6667'"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/iotdb/6667'"]
       interval: 5s
       timeout: 5s
       retries: 60
