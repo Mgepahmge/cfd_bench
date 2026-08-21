@@ -5,6 +5,7 @@ __pycache__/
 # Large local datasets / caches (do not commit)
 vtk_dir/
 data/
+datasets/
 TileDB_Instances/
 
 # Generated outputs (regenerable)

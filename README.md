@@ -411,3 +411,10 @@ Add `--verbose` to restore the full diagnostic result, including the containing
 dense cell / one-based Tecplot element ID, supporting dense / one-based node
 IDs, barycentric weights, coordinate reconstruction error, projected support
 values, and per-variable support values.
+
+## Docker
+
+A complete Docker Compose environment is provided in `compose.yaml`. It includes
+PostgreSQL/PostGIS, Apache IoTDB, and a CFD-Bench application image containing
+TileDB, VTK, H5 and all Python clients. See `docker/README.md` for build, ingest,
+benchmark and test-script commands.

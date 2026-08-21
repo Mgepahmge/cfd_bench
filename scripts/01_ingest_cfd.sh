@@ -26,4 +26,8 @@ mkdir -p "$CFD_BENCH_DATA_ROOT"
 exec cfd-bench ingest \
   --dat "$CFD_DATA_PATH" \
   --datasets "$DATASET" \
-  --backends postgresql iotdb tiledb vtk
+  --backends postgresql iotdb tiledb vtk \
+  --iotdb-host "${CFD_BENCH_IOTDB_HOST:-127.0.0.1}" \
+  --iotdb-port "${CFD_BENCH_IOTDB_PORT:-6667}" \
+  --iotdb-user "${CFD_BENCH_IOTDB_USER:-root}" \
+  --iotdb-password "${CFD_BENCH_IOTDB_PASSWORD:-root}"

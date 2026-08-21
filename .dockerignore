@@ -1,0 +1,19 @@
+.git
+.gitignore
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+.venv
+venv
+build
+dist
+
+# Runtime data is mounted by Compose and must not be baked into the image.
+data/*
+datasets/*
+output/*
+
+# Local editor files
+.idea
+.vscode
