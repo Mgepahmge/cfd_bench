@@ -1,0 +1,20 @@
+# The API image extends the already-built CFD-Bench image.  This keeps the
+# benchmark/core image frozen and makes offline delivery a single additional
+# image artifact.
+ARG CFD_BENCH_BASE_IMAGE=cfd-bench:v22.4.2
+FROM ${CFD_BENCH_BASE_IMAGE}
+
+ENV CFD_BENCH_API_DATA_ROOT=/app/api-data
+
+COPY api/requirements.txt /tmp/cfd-bench-api-requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/cfd-bench-api-requirements.txt \
+    && python -m pip check
+
+COPY api/cfd_bench_api /app/cfd_bench_api
+RUN mkdir -p /app/api-data/uploads /app/api-data/jobs
+
+EXPOSE 8000
+
+# The base image ENTRYPOINT still performs the existing PostgreSQL/IoTDB
+# readiness checks, then execs this command.
+CMD ["python", "-m", "uvicorn", "cfd_bench_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

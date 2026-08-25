@@ -1,0 +1,98 @@
+name: cfd-bench
+
+services:
+  postgres:
+    platform: linux/amd64
+    image: postgis/postgis:16-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cae_data
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123456"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cae_data -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  iotdb:
+    platform: linux/amd64
+    image: apache/iotdb:2.0.10-standalone
+    hostname: iotdb
+    restart: unless-stopped
+    privileged: true
+    environment:
+      cn_internal_address: iotdb
+      cn_internal_port: "10710"
+      cn_consensus_port: "10720"
+      cn_seed_config_node: iotdb:10710
+      dn_rpc_address: iotdb
+      dn_internal_address: iotdb
+      dn_rpc_port: "6667"
+      dn_internal_port: "10730"
+      dn_mpp_data_exchange_port: "10740"
+      dn_schema_region_consensus_port: "10750"
+      dn_data_region_consensus_port: "10760"
+      dn_seed_config_node: iotdb:10710
+      schema_replication_factor: "1"
+      data_replication_factor: "1"
+      disk_space_warning_threshold: "${CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD:-0.01}"
+    volumes:
+      - iotdb-data:/iotdb/data
+      - iotdb-logs:/iotdb/logs
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /iotdb/sbin/start-cli.sh -h iotdb -p 6667 -u root -pw root
+          -e "show datanodes" 2>/dev/null
+          | grep -Eq '\|[[:space:]]*[0-9]+[[:space:]]*\|[[:space:]]*Running[[:space:]]*\|'
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  cfd-bench-api:
+    platform: linux/amd64
+    image: cfd-bench-api:v1
+    restart: unless-stopped
+    environment:
+      CFD_BENCH_DATA_ROOT: /app/data
+      CFD_BENCH_API_DATA_ROOT: /app/api-data
+
+      CFD_BENCH_PG_DB_NAME: cae_data
+      CFD_BENCH_PG_DATABASE: cae_data
+      CFD_BENCH_PG_USER: postgres
+      CFD_BENCH_PG_PASSWORD: "123456"
+      CFD_BENCH_PG_HOST: postgres
+      CFD_BENCH_PG_PORT: "5432"
+
+      CFD_BENCH_IOTDB_HOST: iotdb
+      CFD_BENCH_IOTDB_PORT: "6667"
+      CFD_BENCH_IOTDB_USER: root
+      CFD_BENCH_IOTDB_PASSWORD: root
+      CFD_BENCH_IOTDB_ROOT_PATH: root.simulation_data
+      CFD_BENCH_IOTDB_FETCH_SIZE: "50000"
+      CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD: "${CFD_BENCH_IOTDB_DISK_SPACE_WARNING_THRESHOLD:-0.01}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iotdb:
+        condition: service_healthy
+    ports:
+      - "${CFD_BENCH_API_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./api-data:/app/api-data
+
+volumes:
+  postgres-data:
+  iotdb-data:
+  iotdb-logs:
