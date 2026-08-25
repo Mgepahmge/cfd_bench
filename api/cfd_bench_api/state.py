@@ -222,6 +222,55 @@ class StateStore:
         with self._connect() as conn:
             conn.execute("UPDATE jobs SET pid=? WHERE job_id=?", (int(pid), job_id))
 
+    def finish_job_if_running(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        exit_code: Optional[int],
+        error: Optional[str] = None,
+    ) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE jobs SET status=?, exit_code=?, error=?, finished_at=?, pid=NULL
+                WHERE job_id=? AND status='running'
+                """,
+                (status, exit_code, error, utc_now(), job_id),
+            )
+            return cur.rowcount == 1
+
+    def cancel_unstarted_job(self, job_id: str) -> bool:
+        """Converge a claimed job that has not registered a subprocess PID."""
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE jobs
+                SET status='cancelled', finished_at=?, pid=NULL,
+                    error=COALESCE(error, 'job cancelled by user before subprocess start')
+                WHERE job_id=? AND status='running' AND pid IS NULL
+                  AND cancel_requested=1
+                """,
+                (utc_now(), job_id),
+            )
+            return cur.rowcount == 1
+
+    def cancel_running_for_pid(self, job_id: str, pid: int, *, error: str) -> bool:
+        """Converge a cancelled running job only if it still owns *pid*."""
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE jobs
+                SET status='cancelled', finished_at=?, pid=NULL, error=?
+                WHERE job_id=? AND status='running' AND pid=?
+                  AND cancel_requested=1
+                """,
+                (utc_now(), error, job_id, int(pid)),
+            )
+            return cur.rowcount == 1
+
     def finish_job(
         self,
         job_id: str,

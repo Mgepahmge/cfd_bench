@@ -143,7 +143,7 @@ class BenchmarkRequest(StrictModel):
         Literal["w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11"]
     ] = Field(default_factory=lambda: ["w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8"])
     backends: List[Backend] = Field(default_factory=lambda: ["postgresql"])
-    duration_sec: float = Field(default=60.0, gt=0)
+    duration_sec: float = Field(default=5.0, gt=0)
     geom_engine: Literal["db", "vtk"] = "db"
     steps: Optional[List[int]] = None
     variables: Optional[List[str]] = None

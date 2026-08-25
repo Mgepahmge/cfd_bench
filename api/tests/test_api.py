@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import subprocess
 import sys
 import threading
 import time
@@ -134,6 +135,137 @@ def test_command_builders_are_accepted_by_existing_cli(cfg, tmp_path, monkeypatc
     assert bench_args.geom_engine == "vtk"
     assert bench_args.output == str(tmp_path / "results.csv")
 
+
+
+def test_benchmark_default_duration_is_five_seconds():
+    request = BenchmarkRequest(datasets=["beam"])
+    assert request.duration_sec == 5.0
+
+
+def test_cancel_waiting_benchmark_stays_queued_and_never_starts(tmp_path):
+    cfg = ApiConfig(
+        data_root=tmp_path / "state",
+        cfd_bench_executable=sys.executable,
+        scheduler_poll_sec=0.01,
+        cancel_grace_sec=0.05,
+    )
+    cfg.ensure_directories()
+    store = StateStore(cfg.state_db)
+    gate = ExecutionGate()
+    manager = JobManager(cfg, store, gate)
+    sentinel = tmp_path / "should-not-run.txt"
+
+    assert gate.try_begin_interactive_read()
+    manager.start()
+    try:
+        job = manager.create_job(
+            job_type="benchmark",
+            dataset="beam",
+            upload_id=None,
+            request={},
+            command=[
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(sentinel)!r}).write_text('ran')",
+            ],
+        )
+
+        # Give the worker time to reach ExecutionGate. The regression was that
+        # the worker claimed the row first, leaving `running + pid=NULL` here.
+        time.sleep(0.05)
+        waiting = store.get_job(job["job_id"])
+        assert waiting["status"] == "queued"
+        assert waiting["pid"] is None
+
+        cancelled = manager.cancel(job["job_id"])
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["cancel_requested"] is True
+
+        gate.end_interactive_read()
+        time.sleep(0.1)
+        assert not sentinel.exists()
+        assert store.get_job(job["job_id"])["status"] == "cancelled"
+    finally:
+        # Safe even if the assertion above failed before releasing the gate.
+        gate.end_interactive_read()
+        manager.stop()
+
+
+def test_cancel_claimed_job_without_pid_converges_immediately(tmp_path):
+    cfg = ApiConfig(
+        data_root=tmp_path / "state",
+        cfd_bench_executable=sys.executable,
+        scheduler_poll_sec=0.01,
+        cancel_grace_sec=0.05,
+    )
+    cfg.ensure_directories()
+    store = StateStore(cfg.state_db)
+    gate = ExecutionGate()
+    manager = JobManager(cfg, store, gate)
+
+    job = manager.create_job(
+        job_type="benchmark",
+        dataset="beam",
+        upload_id=None,
+        request={},
+        command=[sys.executable, "-c", "raise SystemExit('must not execute')"],
+    )
+    assert store.claim_job(job["job_id"])
+    claimed = store.get_job(job["job_id"])
+    assert claimed["status"] == "running"
+    assert claimed["pid"] is None
+
+    cancelled = manager.cancel(job["job_id"])
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["cancel_requested"] is True
+    assert cancelled["pid"] is None
+    assert cancelled["finished_at"] is not None
+
+
+def test_cancel_falls_back_to_persisted_pid_when_popen_handle_is_missing(tmp_path):
+    cfg = ApiConfig(
+        data_root=tmp_path / "state",
+        cfd_bench_executable=sys.executable,
+        scheduler_poll_sec=0.01,
+        cancel_grace_sec=0.05,
+    )
+    cfg.ensure_directories()
+    store = StateStore(cfg.state_db)
+    gate = ExecutionGate()
+    manager = JobManager(cfg, store, gate)
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+    job = manager.create_job(
+        job_type="benchmark",
+        dataset="beam",
+        upload_id=None,
+        request={},
+        command=command,
+    )
+    assert store.claim_job(job["job_id"])
+    process = subprocess.Popen(command, start_new_session=True)
+    try:
+        store.set_job_pid(job["job_id"], process.pid)
+        # Intentionally do not populate manager._processes: this simulates the
+        # persisted-PID / missing-in-memory-handle recovery path.
+        response = manager.cancel(job["job_id"])
+        assert response["cancel_requested"] is True
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if store.get_job(job["job_id"])["status"] == "cancelled":
+                break
+            time.sleep(0.01)
+        assert store.get_job(job["job_id"])["status"] == "cancelled"
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and process.poll() is None:
+            time.sleep(0.01)
+        assert process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=2)
 
 def test_resumable_upload_and_offset_conflict(client, cfg):
     response = client.post(

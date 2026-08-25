@@ -135,7 +135,7 @@ POST /api/v1/benchmarks
   "datasets": ["JBC_615k"],
   "workloads": ["w1", "w2", "w6"],
   "backends": ["iotdb"],
-  "duration_sec": 60,
+  "duration_sec": 5,
   "geom_engine": "db"
 }
 ```
