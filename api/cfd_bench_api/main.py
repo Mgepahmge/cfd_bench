@@ -100,6 +100,57 @@ def _require_completed_upload(uploads: UploadService, upload_id: str, fmt: str) 
     return upload
 
 
+
+def _resolve_server_ingest_source(config: ApiConfig, raw_path: str, fmt: str) -> Path:
+    """Resolve a server-side ingest path inside an explicitly allowed root.
+
+    The API accepts container-visible paths (normally /share/...).  resolve() is
+    intentionally used before the allow-root check so ``..`` components and
+    symlinks cannot escape the configured shared directories.
+    """
+
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        raise HTTPException(
+            status_code=422,
+            detail="server_path must be an absolute path inside the API container (for example /share/case1)",
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=f"server_path does not exist: {raw_path}") from exc
+
+    allowed = []
+    for root in config.server_ingest_roots:
+        try:
+            allowed.append(root.expanduser().resolve(strict=True))
+        except (FileNotFoundError, OSError):
+            # A configured but currently unmounted root simply cannot match.
+            continue
+    if not any(resolved == root or root in resolved.parents for root in allowed):
+        roots_text = ", ".join(str(root) for root in config.server_ingest_roots)
+        raise HTTPException(
+            status_code=403,
+            detail=f"server_path is outside the allowed ingest roots: {roots_text}",
+        )
+
+    if fmt == "cfd-dat":
+        if resolved.is_file():
+            if resolved.suffix.lower() != ".dat":
+                raise HTTPException(status_code=422, detail="cfd-dat server_path file must end in .dat")
+        elif resolved.is_dir():
+            if not any(item.is_file() and item.suffix.lower() == ".dat" for item in resolved.iterdir()):
+                raise HTTPException(
+                    status_code=422,
+                    detail="cfd-dat server_path directory contains no direct .dat files",
+                )
+        else:
+            raise HTTPException(status_code=422, detail="cfd-dat server_path must be a file or directory")
+    elif fmt == "h5":
+        if not resolved.is_file() or resolved.suffix.lower() not in {".h5", ".hdf5"}:
+            raise HTTPException(status_code=422, detail="h5 server_path must be an .h5 or .hdf5 file")
+    return resolved
+
 def _tail(path: Path, max_bytes: int) -> str:
     if not path.is_file():
         return ""
@@ -172,6 +223,8 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
                 "benchmark_exclusive": True,
                 "interpolation_blocked_during_heavy_jobs": True,
                 "upload_chunks_blocked_during_benchmark": True,
+                "server_path_ingest": True,
+                "server_ingest_roots": [str(path) for path in cfg.server_ingest_roots],
             },
         )
 
@@ -277,12 +330,18 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
     @app.post("/api/v1/ingests", response_model=JobView, status_code=202)
     def create_ingest(payload: IngestRequest = Body(discriminator="format")):
         if isinstance(payload, CfdIngestRequest):
-            upload = _require_completed_upload(uploads, payload.upload_id, "cfd-dat")
-            source = uploads.files_dir(payload.upload_id)
+            if payload.server_path is not None:
+                source = _resolve_server_ingest_source(cfg, payload.server_path, "cfd-dat")
+            else:
+                upload = _require_completed_upload(uploads, payload.upload_id, "cfd-dat")
+                source = uploads.files_dir(payload.upload_id)
             command = build_cfd_ingest_command(cfg, payload, source)
         elif isinstance(payload, H5IngestRequest):
-            upload = _require_completed_upload(uploads, payload.upload_id, "h5")
-            source = uploads.file_path(payload.upload_id, upload["files"][0]["name"])
+            if payload.server_path is not None:
+                source = _resolve_server_ingest_source(cfg, payload.server_path, "h5")
+            else:
+                upload = _require_completed_upload(uploads, payload.upload_id, "h5")
+                source = uploads.file_path(payload.upload_id, upload["files"][0]["name"])
             command = build_h5_ingest_command(cfg, payload, source)
         else:  # pragma: no cover - discriminator already enforces this
             raise HTTPException(status_code=422, detail="unsupported ingest format")

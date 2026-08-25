@@ -66,6 +66,7 @@ services:
     environment:
       CFD_BENCH_DATA_ROOT: /app/data
       CFD_BENCH_API_DATA_ROOT: /app/api-data
+      CFD_BENCH_API_SERVER_INGEST_ROOTS: /share
 
       CFD_BENCH_PG_DB_NAME: cae_data
       CFD_BENCH_PG_DATABASE: cae_data
@@ -89,8 +90,9 @@ services:
     ports:
       - "${CFD_BENCH_API_PORT:-8000}:8000"
     volumes:
-      - ./data:/app/data
-      - ./api-data:/app/api-data
+      - "${CFD_BENCH_DATA_HOST_PATH:-./data}:/app/data"
+      - "${CFD_BENCH_API_DATA_HOST_PATH:-./api-data}:/app/api-data"
+      - "${CFD_BENCH_SERVER_INGEST_HOST_PATH:-/share}:/share:ro"
 
 volumes:
   postgres-data:

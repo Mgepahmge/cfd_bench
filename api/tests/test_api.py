@@ -38,6 +38,7 @@ def cfg(tmp_path):
         max_chunk_size=8,
         scheduler_poll_sec=0.02,
         cancel_grace_sec=0.05,
+        server_ingest_roots=(tmp_path / "share",),
     )
 
 
@@ -381,6 +382,120 @@ def test_ingest_job_uses_completed_upload_and_existing_cli_contract(client, app)
     assert args.backends == ["iotdb", "vtk"]
     assert Path(args.dat).name == "files"
 
+
+
+def test_server_path_cfd_ingest_uses_allowed_share_without_upload(client, app, cfg):
+    case_dir = cfg.server_ingest_roots[0] / "cases" / "Kvlcc2"
+    case_dir.mkdir(parents=True)
+    (case_dir / "200.dat").write_text("dummy", encoding="utf-8")
+    (case_dir / "400.dat").write_text("dummy", encoding="utf-8")
+
+    response = client.post(
+        "/api/v1/ingests",
+        json={
+            "format": "cfd-dat",
+            "server_path": str(case_dir),
+            "dataset": "Kvlcc2_351k",
+            "backends": ["iotdb"],
+            "zone_indices": [0, 1],
+        },
+    )
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["upload_id"] is None
+
+    job = app.state.store.get_job(body["job_id"])
+    assert job is not None
+    args = build_parser().parse_args(job["command"][1:])
+    assert args.command == "ingest"
+    assert Path(args.dat) == case_dir.resolve()
+    assert args.datasets == "Kvlcc2_351k"
+
+
+def test_server_path_ingest_rejects_paths_outside_allowed_roots(client, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "200.dat").write_text("dummy", encoding="utf-8")
+
+    response = client.post(
+        "/api/v1/ingests",
+        json={
+            "format": "cfd-dat",
+            "server_path": str(outside),
+            "dataset": "forbidden",
+            "backends": ["iotdb"],
+        },
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_server_path_ingest_rejects_symlink_escape(client, cfg, tmp_path):
+    outside = tmp_path / "outside-symlink"
+    outside.mkdir()
+    (outside / "200.dat").write_text("dummy", encoding="utf-8")
+    share = cfg.server_ingest_roots[0]
+    share.mkdir(parents=True, exist_ok=True)
+    link = share / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable in this test environment")
+
+    response = client.post(
+        "/api/v1/ingests",
+        json={
+            "format": "cfd-dat",
+            "server_path": str(link),
+            "dataset": "forbidden",
+            "backends": ["iotdb"],
+        },
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_server_path_h5_ingest_accepts_allowed_file(client, app, cfg):
+    share = cfg.server_ingest_roots[0]
+    share.mkdir(parents=True, exist_ok=True)
+    source = share / "beam.h5"
+    source.write_bytes(b"not-read-by-api-route")
+
+    response = client.post(
+        "/api/v1/ingests",
+        json={
+            "format": "h5",
+            "server_path": str(source),
+            "dataset": "beam",
+            "backends": ["postgresql"],
+        },
+    )
+    assert response.status_code == 202, response.text
+    job = app.state.store.get_job(response.json()["job_id"])
+    args = build_parser().parse_args(job["command"][1:])
+    assert args.command == "ingest-h5"
+    assert Path(args.h5) == source.resolve()
+
+
+def test_ingest_request_rejects_missing_or_ambiguous_source(client, cfg):
+    missing = client.post(
+        "/api/v1/ingests",
+        json={"format": "cfd-dat", "dataset": "beam", "backends": ["iotdb"]},
+    )
+    assert missing.status_code == 422
+
+    share = cfg.server_ingest_roots[0]
+    share.mkdir(parents=True, exist_ok=True)
+    (share / "200.dat").write_text("dummy", encoding="utf-8")
+    both = client.post(
+        "/api/v1/ingests",
+        json={
+            "format": "cfd-dat",
+            "upload_id": "upl_x",
+            "server_path": str(share),
+            "dataset": "beam",
+            "backends": ["iotdb"],
+        },
+    )
+    assert both.status_code == 422
 
 def test_h5_ingest_requires_h5_upload(client):
     upload = _create_completed_upload(client, "cfd-dat", "200.dat", b"x")

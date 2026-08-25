@@ -127,6 +127,62 @@ POST /api/v1/ingests
 Use `POST /api/v1/uploads/{upload_id}/inspect-h5` before H5 ingest to expose the
 same source structure that the core `inspect-h5 --json` command reads.
 
+
+## Server-side ingest without upload
+
+When source files already exist on the API host, they do not need to cross HTTP.
+By default `compose.api.yaml` bind-mounts host `/share` to container `/share`
+read-only, and the API allows `server_path` only under `/share` (including any
+subdirectory).  The allow roots can be changed with
+`CFD_BENCH_API_SERVER_INGEST_ROOTS`; paths are resolved before validation so
+`..` and symlink escapes are rejected.
+
+For CFD DAT files/directories:
+
+```json
+POST /api/v1/ingests
+{
+  "format": "cfd-dat",
+  "server_path": "/share/cases/Kvlcc2/Postprocessing",
+  "dataset": "Kvlcc2_351k",
+  "backends": ["iotdb"],
+  "zone_indices": [0, 1]
+}
+```
+
+For H5, `server_path` points directly to an `.h5`/`.hdf5` file.  `upload_id` and
+`server_path` are mutually exclusive; the original upload-based ingest contract
+remains unchanged.
+
+To mount another host directory while preserving the safe `/share` path inside
+the container, set for example:
+
+```bash
+CFD_BENCH_SERVER_INGEST_HOST_PATH=/mnt/large-share \
+  docker compose -f compose.api.yaml up -d --force-recreate cfd-bench-api
+```
+
+## Configurable host-side data/cache locations
+
+The container paths remain stable (`/app/data` for CFD-Bench file-backed data
+and `/app/api-data` for API state/uploads/jobs), but their host locations are
+parameterized.  This avoids core-code changes and lets the data/cache live on
+any disk or under the project directory.
+
+```bash
+# Examples: keep them under the project root
+export CFD_BENCH_DATA_HOST_PATH=./data
+export CFD_BENCH_API_DATA_HOST_PATH=./api-data
+
+# Or move them to a larger disk
+export CFD_BENCH_DATA_HOST_PATH=/data2/cfd-bench/data
+export CFD_BENCH_API_DATA_HOST_PATH=/data2/cfd-bench/api-data
+
+docker compose -f compose.api.yaml up -d --force-recreate cfd-bench-api
+```
+
+The same values may be placed in the Compose `.env` file.
+
 ## Benchmark jobs and CSV
 
 ```json

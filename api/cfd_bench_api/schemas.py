@@ -81,7 +81,8 @@ class UploadSession(StrictModel):
 
 class CfdIngestRequest(StrictModel):
     format: Literal["cfd-dat"] = "cfd-dat"
-    upload_id: str
+    upload_id: Optional[str] = None
+    server_path: Optional[str] = Field(default=None, min_length=1, max_length=4096)
     dataset: str = Field(min_length=1, max_length=200)
     backends: List[Backend] = Field(
         default_factory=lambda: ["postgresql", "iotdb", "tiledb"]
@@ -95,10 +96,19 @@ class CfdIngestRequest(StrictModel):
     def validate_dataset_token(cls, value: str) -> str:
         return _reject_cli_option_like(value, "dataset")
 
+    @model_validator(mode="after")
+    def validate_source(self):
+        if bool(self.upload_id) == bool(self.server_path):
+            raise ValueError("exactly one of upload_id or server_path must be provided")
+        if self.server_path is not None and "\x00" in self.server_path:
+            raise ValueError("server_path must not contain NUL")
+        return self
+
 
 class H5IngestRequest(StrictModel):
     format: Literal["h5"] = "h5"
-    upload_id: str
+    upload_id: Optional[str] = None
+    server_path: Optional[str] = Field(default=None, min_length=1, max_length=4096)
     dataset: str = Field(min_length=1, max_length=200)
     backends: List[Backend] = Field(default_factory=lambda: ["postgresql"])
     instance: Optional[str] = None
@@ -132,6 +142,14 @@ class H5IngestRequest(StrictModel):
             _reject_cli_option_like(target, "field mapping target"): _reject_cli_option_like(source, "field mapping source")
             for target, source in value.items()
         }
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if bool(self.upload_id) == bool(self.server_path):
+            raise ValueError("exactly one of upload_id or server_path must be provided")
+        if self.server_path is not None and "\x00" in self.server_path:
+            raise ValueError("server_path must not contain NUL")
+        return self
 
 
 IngestRequest = Union[CfdIngestRequest, H5IngestRequest]
