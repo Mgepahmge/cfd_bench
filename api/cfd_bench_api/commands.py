@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List
 
 from .config import ApiConfig
-from .schemas import BenchmarkRequest, CfdIngestRequest, H5IngestRequest
+from .schemas import BenchmarkRequest, CfdIngestRequest, CouplingRequest, H5IngestRequest
 
 
 def _extend_list(command: List[str], flag: str, values) -> None:
@@ -115,4 +115,37 @@ def build_benchmark_command(
         command.extend(
             ["--progress", "--progress-interval", str(request.progress_interval_sec)]
         )
+    return command
+
+
+def build_coupling_command(
+    config: ApiConfig,
+    request: CouplingRequest,
+    result_h5: Path,
+) -> List[str]:
+    command = [
+        config.cfd_bench_executable,
+        "couple",
+        "--structure-dataset",
+        request.structure_dataset,
+        "--cfd-dataset",
+        request.cfd_dataset,
+        "--cfd-step",
+        str(request.cfd_step),
+        "--output",
+        str(result_h5),
+        "--batch-size",
+        str(request.batch_size),
+        "--progress-interval",
+        str(request.progress_interval_sec),
+    ]
+    _extend_list(command, "--variables", request.variables)
+    if request.structure_zone:
+        command.extend(["--structure-zone", request.structure_zone])
+    if request.cfd_zone:
+        command.extend(["--cfd-zone", request.cfd_zone])
+    if request.diagnostics:
+        command.append("--diagnostics")
+    if not request.progress:
+        command.append("--no-progress")
     return command

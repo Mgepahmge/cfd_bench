@@ -6,7 +6,7 @@ import csv
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
@@ -17,6 +17,7 @@ from cfd_bench.workloads.runner import DEFAULT_WORKLOADS, H5_ONLY_WORKLOADS
 from .commands import (
     build_benchmark_command,
     build_cfd_ingest_command,
+    build_coupling_command,
     build_h5_ingest_command,
 )
 from .config import ApiConfig
@@ -27,6 +28,8 @@ from .schemas import (
     BenchmarkRequest,
     CapabilitiesResponse,
     CfdIngestRequest,
+    CouplingRequest,
+    CouplingResult,
     CsvResult,
     DatasetEntry,
     DatasetList,
@@ -70,7 +73,9 @@ def _upload_view(upload: dict, chunk_size: int) -> UploadSession:
 
 
 def _job_view(job: dict) -> JobView:
-    result_path = job.get("result_csv")
+    result_path = job.get("result_csv") or (
+        job.get("result_h5") if job.get("status") == "succeeded" else None
+    )
     partial = bool(result_path and Path(result_path).is_file() and Path(result_path).stat().st_size > 0)
     return JobView(
         job_id=job["job_id"],
@@ -218,6 +223,14 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
                 "batch_points": True,
                 "diagnostics": True,
             },
+            coupling={
+                "backends": ["iotdb"],
+                "structure_dataset_types": ["h5"],
+                "cfd_dataset_types": ["cfd"],
+                "canonical_result": "h5",
+                "batch_processing": True,
+                "progress": True,
+            },
             scheduling={
                 "heavy_job_workers": 1,
                 "benchmark_exclusive": True,
@@ -309,7 +322,7 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
         if not gate.try_begin_interactive_read():
             raise HTTPException(
                 status_code=423,
-                detail="H5 inspection is temporarily disabled while ingest/benchmark is running",
+                detail="H5 inspection is temporarily disabled while a heavy job is running",
             )
         try:
             upload = _require_completed_upload(uploads, upload_id, "h5")
@@ -381,10 +394,38 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
         assert job is not None
         return _job_view(job)
 
+    @app.post("/api/v1/couplings", response_model=JobView, status_code=202)
+    def create_coupling(payload: CouplingRequest):
+        job_id = manager.new_job_id()
+        job_dir = cfg.jobs_root / job_id
+        job_dir.mkdir(parents=True, exist_ok=False)
+        result_h5 = job_dir / "coupling.h5"
+        stdout_path = job_dir / "stdout.log"
+        stderr_path = job_dir / "stderr.log"
+        stdout_path.touch()
+        stderr_path.touch()
+        command = build_coupling_command(cfg, payload, result_h5)
+        store.create_job(
+            job_id=job_id,
+            job_type="coupling",
+            dataset=f"{payload.structure_dataset}->{payload.cfd_dataset}",
+            upload_id=None,
+            request=payload.model_dump(mode="json"),
+            command=command,
+            result_csv=None,
+            result_h5=str(result_h5),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+        )
+        manager.notify()
+        job = store.get_job(job_id)
+        assert job is not None
+        return _job_view(job)
+
     @app.get("/api/v1/jobs", response_model=JobList)
     def list_jobs(
         job_status: Optional[Literal["queued", "running", "succeeded", "failed", "cancelled"]] = Query(default=None, alias="status"),
-        job_type: Optional[Literal["ingest", "benchmark"]] = Query(default=None, alias="type"),
+        job_type: Optional[Literal["ingest", "benchmark", "coupling"]] = Query(default=None, alias="type"),
         limit: int = Query(default=100, ge=1, le=1000),
     ):
         return JobList(
@@ -436,26 +477,72 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
             filename=f"{job_id}-results.csv",
         )
 
-    @app.get("/api/v1/jobs/{job_id}/result", response_model=CsvResult)
+    @app.get("/api/v1/jobs/{job_id}/result.h5")
+    def result_h5(job_id: str):
+        job = store.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job["type"] != "coupling" or not job.get("result_h5"):
+            raise HTTPException(status_code=409, detail="job has no coupling H5 result")
+        if job["status"] != "succeeded":
+            raise HTTPException(status_code=409, detail="coupling H5 is available only after job success")
+        path = Path(job["result_h5"])
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="coupling H5 is not available")
+        return FileResponse(
+            path,
+            media_type="application/x-hdf5",
+            filename=f"{job_id}-coupling.h5",
+        )
+
+    @app.get("/api/v1/jobs/{job_id}/result", response_model=Union[CsvResult, CouplingResult])
     def result_json(job_id: str):
         job = store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
-        if job["type"] != "benchmark" or not job.get("result_csv"):
-            raise HTTPException(status_code=409, detail="job has no benchmark CSV result")
-        path = Path(job["result_csv"])
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="benchmark CSV is not available yet")
-        with path.open("r", encoding="utf-8", newline="") as fh:
-            reader = csv.DictReader(fh)
-            rows = [dict(row) for row in reader]
-            columns = list(reader.fieldnames or [])
-        return CsvResult(
-            job_id=job_id,
-            partial=job["status"] != "succeeded",
-            columns=columns,
-            rows=rows,
-        )
+        if job["type"] == "benchmark" and job.get("result_csv"):
+            path = Path(job["result_csv"])
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="benchmark CSV is not available yet")
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                rows = [dict(row) for row in reader]
+                columns = list(reader.fieldnames or [])
+            return CsvResult(
+                job_id=job_id,
+                partial=job["status"] != "succeeded",
+                columns=columns,
+                rows=rows,
+            )
+        if job["type"] == "coupling" and job.get("result_h5"):
+            if job["status"] != "succeeded":
+                raise HTTPException(status_code=409, detail="coupling result is available only after job success")
+            path = Path(job["result_h5"])
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="coupling H5 is not available")
+            try:
+                import h5py
+
+                with h5py.File(path, "r") as h5:
+                    meta = h5["metadata"].attrs
+                    variables = json.loads(str(meta.get("variables_json", "[]")))
+                    return CouplingResult(
+                        job_id=job_id,
+                        structure_dataset=str(meta.get("structure_dataset", "")),
+                        structure_zone=str(meta.get("structure_zone", "")),
+                        cfd_dataset=str(meta.get("cfd_dataset", "")),
+                        cfd_zone=str(meta.get("cfd_zone", "")),
+                        cfd_step=int(meta.get("cfd_step", 0)),
+                        variables=[str(v) for v in variables],
+                        node_count=int(meta.get("node_count", 0)),
+                        success_count=int(meta.get("success_count", 0)),
+                        outside_count=int(meta.get("outside_count", 0)),
+                        no_containing_cell_count=int(meta.get("no_containing_cell_count", 0)),
+                        failed_count=int(meta.get("failed_count", 0)),
+                    )
+            except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=500, detail=f"invalid coupling H5 result: {exc}") from exc
+        raise HTTPException(status_code=409, detail="job has no supported result")
 
     @app.post("/api/v1/interpolate", response_model=InterpolationResponse)
     async def interpolate(payload: InterpolationRequest):
@@ -463,7 +550,7 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
             raise HTTPException(
                 status_code=423,
                 detail=(
-                    "ingest/benchmark job is running; interpolation is temporarily disabled "
+                    "a heavy ingest/benchmark/coupling job is running; interpolation is temporarily disabled "
                     "to avoid resource interference"
                 ),
             )

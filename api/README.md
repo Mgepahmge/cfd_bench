@@ -249,3 +249,33 @@ and support values already exposed by the current interpolation engine.
 - Interpolation is also blocked during ingest because both may stress the same
   database backend.
 - Job/status/log/CSV endpoints remain available while a benchmark runs.
+
+## Structure-to-CFD coupling
+
+The API exposes coupling as a queued heavy job:
+
+```http
+POST /api/v1/couplings
+Content-Type: application/json
+
+{
+  "structure_dataset": "structure_01",
+  "cfd_dataset": "flow_default",
+  "cfd_step": 1000,
+  "variables": ["U", "V", "W", "P"],
+  "batch_size": 4096,
+  "diagnostics": false,
+  "progress": true
+}
+```
+
+Both source datasets must already exist in IoTDB (`h5` for the structure and
+Tecplot CFD for the fluid data).  The job writes an independent canonical H5
+result under its job directory.  After success:
+
+- `GET /api/v1/jobs/{job_id}/result` returns the small coupling summary.
+- `GET /api/v1/jobs/{job_id}/result.h5` downloads the canonical H5 result.
+- `GET /api/v1/jobs/{job_id}/logs` shows the mapping progress.
+
+Coupling does not modify either source dataset and is serialized with the
+existing heavy-job worker.

@@ -18,7 +18,7 @@ from .state import StateStore
 class ExecutionGate:
     """Coordinate benchmark-sensitive work without serialising HTTP itself.
 
-    Heavy ingest/benchmark subprocesses are single-worker jobs. Interpolation
+    Heavy ingest/benchmark/coupling subprocesses are single-worker jobs. Interpolation
     is an interactive database read and upload PATCH calls are streaming disk
     writes. A benchmark waits for any already-active interpolation/upload
     chunk to finish, then prevents new ones from entering until the benchmark
@@ -83,7 +83,7 @@ class ExecutionGate:
         return self.active_job_type == "benchmark"
 
     def heavy_job_running(self) -> bool:
-        return self.active_job_type in {"benchmark", "ingest"}
+        return self.active_job_type in {"benchmark", "ingest", "coupling"}
 
     def try_begin_upload_chunk(self) -> bool:
         with self._cond:
@@ -99,7 +99,7 @@ class ExecutionGate:
 
     def try_begin_interactive_read(self) -> bool:
         with self._cond:
-            if self._active_job_type in {"benchmark", "ingest"}:
+            if self._active_job_type in {"benchmark", "ingest", "coupling"}:
                 return False
             self._active_interactive_reads += 1
             return True
@@ -160,6 +160,7 @@ class JobManager:
         request: dict,
         command: list[str],
         result_csv: Optional[Path] = None,
+        result_h5: Optional[Path] = None,
     ) -> dict:
         job_id = self.new_job_id()
         job_dir = self.config.jobs_root / job_id
@@ -177,6 +178,7 @@ class JobManager:
             request=request,
             command=command,
             result_csv=str(result_csv) if result_csv else None,
+            result_h5=str(result_h5) if result_h5 else None,
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
         )

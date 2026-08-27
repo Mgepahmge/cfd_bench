@@ -9,6 +9,7 @@ from cfd_bench.cli.ingest_cmd import add_ingest_parser
 from cfd_bench.cli.h5_cmd import add_h5_parsers
 from cfd_bench.cli.run_cmd import add_run_parser
 from cfd_bench.cli.interpolate_cmd import add_interpolate_parser
+from cfd_bench.cli.coupling_cmd import add_coupling_parser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_h5_parsers(subparsers)
     add_run_parser(subparsers)
     add_interpolate_parser(subparsers)
+    add_coupling_parser(subparsers)
     return ap
 
 

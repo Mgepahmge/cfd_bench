@@ -412,6 +412,57 @@ dense cell / one-based Tecplot element ID, supporting dense / one-based node
 IDs, barycentric weights, coordinate reconstruction error, projected support
 values, and per-variable support values.
 
+## Structure-to-CFD coupling
+
+`couple` maps every node of an H5 structural dataset to one selected CFD frame.
+Both datasets only need the IoTDB backend; no PostgreSQL/TileDB ingest is
+required for this feature.  Structural nodes use the coordinates persisted by
+H5 ingest, so the structural and CFD datasets must already use the same global
+coordinate system.
+
+```bash
+cfd-bench ingest-h5 --h5 structure.h5 --datasets structure_01 --backends iotdb
+cfd-bench ingest --dat /path/to/cfd --datasets flow_default --backends iotdb
+
+cfd-bench couple \
+  --structure-dataset structure_01 \
+  --cfd-dataset flow_default \
+  --cfd-step 1000 \
+  --variables U V W P \
+  --output ./structure_01-flow_default-step1000.h5
+```
+
+The coupling engine prepares the CFD mesh once, reads all selected CFD fields
+in one aligned frame query, projects cell-centred values to CFD vertices once,
+then maps structural points in batches.  No IoTDB query is issued inside the
+per-structure-node mapping loop.  Progress is enabled by default; use
+`--no-progress` to disable it and `--batch-size` to tune output batching.
+
+The canonical result is a new independent HDF5 file:
+
+```text
+/metadata
+/nodes/node_id
+/nodes/source_node_label
+/nodes/coordinates
+/values/<variable>
+/diagnostics/status
+/diagnostics/cfd_cell_id
+/diagnostics/reconstruction_error
+```
+
+`--diagnostics` additionally stores four support CFD node IDs and barycentric
+weights for every successfully mapped point.  Points outside the CFD mesh are
+recorded per-node and do not fail the whole coupling job.  The original H5 and
+IoTDB datasets are never modified.
+
+CSV is intentionally not part of the core path.  Convert a finished result
+with the standalone utility when needed:
+
+```bash
+python scripts/coupling_h5_to_csv.py coupling.h5 -o coupling.csv
+```
+
 ## Docker
 
 A complete Docker Compose environment is provided in `compose.yaml`. It includes

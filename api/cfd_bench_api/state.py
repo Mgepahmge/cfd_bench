@@ -60,6 +60,7 @@ class StateStore:
                     request_json TEXT NOT NULL,
                     command_json TEXT NOT NULL,
                     result_csv TEXT,
+                    result_h5 TEXT,
                     stdout_path TEXT NOT NULL,
                     stderr_path TEXT NOT NULL,
                     pid INTEGER,
@@ -76,6 +77,12 @@ class StateStore:
                     ON jobs(upload_id);
                 """
             )
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "result_h5" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN result_h5 TEXT")
             # A process that died cannot still own a child job from this API
             # instance.  Make that explicit instead of leaving stale "running"
             # records forever.
@@ -175,6 +182,7 @@ class StateStore:
         request: Dict[str, Any],
         command: List[str],
         result_csv: Optional[str],
+        result_h5: Optional[str] = None,
         stdout_path: str,
         stderr_path: str,
     ) -> None:
@@ -183,8 +191,8 @@ class StateStore:
                 """
                 INSERT INTO jobs(
                     job_id, type, status, dataset, upload_id, request_json,
-                    command_json, result_csv, stdout_path, stderr_path, created_at
-                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
+                    command_json, result_csv, result_h5, stdout_path, stderr_path, created_at
+                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -194,6 +202,7 @@ class StateStore:
                     json.dumps(request, separators=(",", ":"), ensure_ascii=False),
                     json.dumps(command, separators=(",", ":"), ensure_ascii=False),
                     result_csv,
+                    result_h5,
                     stdout_path,
                     stderr_path,
                     utc_now(),

@@ -406,6 +406,46 @@ class IoTDBRepository:
                 out[exact] = sorted_values[pos[exact]]
         return out
 
+    def fetch_cell_scalar_matrix(
+        self,
+        dataset_key: str,
+        step: int,
+        variables: Sequence[str],
+        cell_ids: Sequence[int],
+        zone: str = "0_Fluid",
+    ) -> np.ndarray:
+        """Return several CFD scalar fields aligned to ``cell_ids`` in one read.
+
+        Coupling can touch every structural point, so issuing one IoTDB query
+        per variable (let alone per target point) is unnecessarily expensive.
+        This method keeps the existing path-resolution contract but selects all
+        requested variables together and aligns the returned rows to the caller's
+        cell-id order.
+        """
+
+        ids = np.asarray(list(cell_ids), dtype=np.int64).reshape(-1)
+        fields = [str(v).upper() for v in variables]
+        if ids.size == 0:
+            return np.zeros((0, len(fields)), dtype=np.float64)
+        if not fields:
+            return np.zeros((ids.size, 0), dtype=np.float64)
+        path = self.resolve_cell_var_path(
+            dataset_key, step, zone=zone, probe_var=fields[0]
+        )
+        ts, values = self._fetch_selected_numeric(path, fields, ids)
+        out = np.full((ids.size, len(fields)), np.nan, dtype=np.float64)
+        if ts.size:
+            order = np.argsort(ts, kind="stable")
+            sorted_ts = ts[order]
+            sorted_values = values[order]
+            pos = np.searchsorted(sorted_ts, ids)
+            mask = pos < sorted_ts.size
+            if np.any(mask):
+                exact = np.zeros(mask.shape, dtype=bool)
+                exact[mask] = sorted_ts[pos[mask]] == ids[mask]
+                out[exact] = sorted_values[pos[exact]]
+        return out
+
     def fetch_cell_scalar_values_contiguous(
         self,
         dataset_key: str,
@@ -695,6 +735,20 @@ class IoTDBRepository:
             for nid, row in zip(ids, values)
         }
 
+    def fetch_nodes_arrays(
+        self, dataset_key: str, zone: str
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return sorted dense node ids and XYZ coordinates as NumPy arrays."""
+
+        sql = f"SELECT x,y,z FROM {self.path_mesh_static(dataset_key, zone, 'nodes')};"
+        ids, values = self.query_numeric_arrays(sql, 3)
+        ids = np.asarray(ids, dtype=np.int64)
+        values = np.asarray(values, dtype=np.float64).reshape(-1, 3)
+        if ids.size <= 1 or np.all(ids[:-1] <= ids[1:]):
+            return ids, values
+        order = np.argsort(ids, kind="stable")
+        return ids[order], values[order]
+
     def fetch_mesh_meta(self, dataset_key: str, zone: str) -> Dict[str, float]:
         path = self.path_mesh_static(dataset_key, zone, "mesh_meta")
         fields = [
@@ -758,6 +812,25 @@ class IoTDBRepository:
         for cid, row in zip(ts, rows):
             out[int(cid)] = row[row >= 0].astype(np.int64, copy=False).tolist()
         return out
+
+    def fetch_cell_nodes_arrays(
+        self, dataset_key: str, zone: str
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return padded connectivity without materialising a Python list per cell."""
+
+        width = self._mesh_meta_int(dataset_key, zone, "max_nodes_per_cell", 16)
+        fields = [f"node_id_{i}" for i in range(width)]
+        sql = (
+            f"SELECT {','.join(fields)} FROM "
+            f"{self.path_mesh_static(dataset_key, zone, 'cell_nodes')};"
+        )
+        ids, values = self.query_numeric_arrays(sql, width)
+        ids = np.asarray(ids, dtype=np.int64)
+        matrix = np.asarray(values, dtype=np.int64).reshape(-1, width)
+        if ids.size <= 1 or np.all(ids[:-1] <= ids[1:]):
+            return ids, matrix
+        order = np.argsort(ids, kind="stable")
+        return ids[order], matrix[order]
 
     def fetch_cell_adjacency(self, dataset_key: str, zone: str) -> Dict[int, List[int]]:
         width = self._mesh_meta_int(dataset_key, zone, "max_neighbors_per_cell", 16)
@@ -1001,6 +1074,54 @@ class IoTDBRepository:
             return bool(self.h5_dataset_metadata(dataset_key).get("is_h5"))
         except Exception:
             return False
+
+    def fetch_h5_structure_nodes(
+        self, dataset_key: str, zone: Optional[str] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return dense ids, original H5 node labels, and XYZ coordinates.
+
+        H5 ingest stores source labels separately from the dense benchmark node
+        ids.  Coupling keeps both identifiers so the output can be mapped back
+        to the original structural model without reopening the source H5 file.
+        """
+
+        meta = self.h5_dataset_metadata(dataset_key)
+        if not meta or not bool(meta.get("is_h5")):
+            raise ValueError(f"dataset={dataset_key!r} is not an H5 dataset")
+        resolved_zone = str(zone or meta.get("zone") or "0_Fluid")
+        node_ids, coordinates = self.fetch_nodes_arrays(dataset_key, resolved_zone)
+        if node_ids.size == 0:
+            return (
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0, 3), dtype=np.float64),
+            )
+
+        source_path = self.path_mesh_static(dataset_key, resolved_zone, "node_source")
+        source_ids, source_values = self.query_numeric_arrays(
+            f"SELECT source_label FROM {source_path};", 1
+        )
+        source_ids = np.asarray(source_ids, dtype=np.int64)
+        source_values = np.asarray(source_values, dtype=np.float64).reshape(-1)
+        source_labels = np.full(node_ids.shape, -1, dtype=np.int64)
+        if source_ids.size:
+            order = np.argsort(source_ids, kind="stable")
+            source_ids = source_ids[order]
+            source_values = source_values[order]
+            pos = np.searchsorted(source_ids, node_ids)
+            valid = pos < source_ids.size
+            exact = np.zeros(valid.shape, dtype=bool)
+            if np.any(valid):
+                exact[valid] = source_ids[pos[valid]] == node_ids[valid]
+            source_labels[exact] = np.rint(source_values[pos[exact]]).astype(np.int64)
+
+        if np.any(source_labels < 0):
+            missing = int(np.count_nonzero(source_labels < 0))
+            raise RuntimeError(
+                f"H5 dataset={dataset_key!r} zone={resolved_zone!r} is missing "
+                f"source labels for {missing} structural nodes"
+            )
+        return node_ids, source_labels, coordinates
 
     def fetch_var_value_range(
         self, dataset_key: str, step: int, var: str, zone: str = "0_Fluid"

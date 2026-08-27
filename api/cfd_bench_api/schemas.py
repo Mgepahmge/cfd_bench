@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Backend = Literal["postgresql", "iotdb", "tiledb", "vtk"]
 UploadFormat = Literal["cfd-dat", "h5"]
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+JobType = Literal["ingest", "benchmark", "coupling"]
 
 def _reject_cli_option_like(value: str, field_name: str) -> str:
     text = str(value)
@@ -183,9 +184,34 @@ class BenchmarkRequest(StrictModel):
         return _reject_cli_option_like(value, info.field_name)
 
 
+class CouplingRequest(StrictModel):
+    structure_dataset: str = Field(min_length=1, max_length=200)
+    cfd_dataset: str = Field(min_length=1, max_length=200)
+    cfd_step: int
+    variables: Optional[List[str]] = None
+    structure_zone: Optional[str] = None
+    cfd_zone: Optional[str] = None
+    batch_size: int = Field(default=4096, ge=1, le=1_000_000)
+    diagnostics: bool = False
+    progress: bool = True
+    progress_interval_sec: float = Field(default=0.25, gt=0)
+
+    @field_validator("structure_dataset", "cfd_dataset", "structure_zone", "cfd_zone")
+    @classmethod
+    def validate_name_tokens(cls, value, info):
+        if value is None:
+            return None
+        return _reject_cli_option_like(value, info.field_name)
+
+    @field_validator("variables")
+    @classmethod
+    def validate_variable_tokens(cls, value):
+        return _reject_cli_option_like_list(value, "variables")
+
+
 class JobView(StrictModel):
     job_id: str
-    type: Literal["ingest", "benchmark"]
+    type: JobType
     status: JobStatus
     dataset: Optional[str] = None
     upload_id: Optional[str] = None
@@ -208,6 +234,22 @@ class CsvResult(StrictModel):
     partial: bool
     columns: List[str]
     rows: List[Dict[str, str]]
+
+
+class CouplingResult(StrictModel):
+    job_id: str
+    canonical: Literal["h5"] = "h5"
+    structure_dataset: str
+    structure_zone: str
+    cfd_dataset: str
+    cfd_zone: str
+    cfd_step: int
+    variables: List[str]
+    node_count: int
+    success_count: int
+    outside_count: int
+    no_containing_cell_count: int
+    failed_count: int
 
 
 class InterpolationRequest(StrictModel):
@@ -270,6 +312,7 @@ class CapabilitiesResponse(StrictModel):
     geometry_engines: List[str]
     upload_formats: List[str]
     interpolation: Dict[str, object]
+    coupling: Dict[str, object]
     scheduling: Dict[str, object]
 
 
