@@ -412,6 +412,23 @@ dense cell / one-based Tecplot element ID, supporting dense / one-based node
 IDs, barycentric weights, coordinate reconstruction error, projected support
 values, and per-variable support values.
 
+## CFD mesh bounds diagnostic
+
+`bounds` reads the global CFD mesh AABB directly from IoTDB `mesh_meta`; no timestep is required.
+It can also classify one or more coordinates using the same AABB tolerance as the coupling engine.
+
+```bash
+cfd-bench bounds --datasets flow_default
+
+cfd-bench bounds \
+  --datasets flow_default \
+  --point -7.2 0.15 0.04 \
+  --point 100 0 0
+```
+
+Use `--json` for machine-readable output. `INSIDE_AABB` only proves that the point is inside the
+global bounding box; a point may still have no containing CFD cell because of mesh holes or geometry.
+
 ## Structure-to-CFD coupling
 
 `couple` maps every node of an H5 structural dataset to one selected CFD frame.
