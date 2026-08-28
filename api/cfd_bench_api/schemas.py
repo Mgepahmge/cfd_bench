@@ -195,8 +195,19 @@ class CouplingRequest(StrictModel):
     diagnostics: bool = False
     progress: bool = True
     progress_interval_sec: float = Field(default=0.25, gt=0)
+    auto_align: bool = False
+    alignment_cfd_zone: Optional[str] = None
+    alignment_max_points: int = Field(default=10000, ge=100, le=200_000)
+    alignment_iterations: int = Field(default=30, ge=1, le=200)
+    alignment_trim_fraction: float = Field(default=0.80, ge=0.25, le=1.0)
 
-    @field_validator("structure_dataset", "cfd_dataset", "structure_zone", "cfd_zone")
+    @field_validator(
+        "structure_dataset",
+        "cfd_dataset",
+        "structure_zone",
+        "cfd_zone",
+        "alignment_cfd_zone",
+    )
     @classmethod
     def validate_name_tokens(cls, value, info):
         if value is None:
@@ -250,6 +261,11 @@ class CouplingResult(StrictModel):
     outside_count: int
     no_containing_cell_count: int
     failed_count: int
+    alignment_enabled: bool = False
+    alignment_scale: Optional[float] = None
+    alignment_reference_zone: Optional[str] = None
+    alignment_rmse: Optional[float] = None
+    alignment_confidence: Optional[str] = None
 
 
 class InterpolationRequest(StrictModel):

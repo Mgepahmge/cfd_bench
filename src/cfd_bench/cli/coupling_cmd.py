@@ -44,6 +44,40 @@ def add_coupling_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Also save support node IDs and barycentric weights for every mapped point",
     )
     ap.add_argument(
+        "--auto-align",
+        action="store_true",
+        help=(
+            "Opt-in uniform 3-D similarity alignment before interpolation. "
+            "Default: disabled; original structure coordinates are used unchanged."
+        ),
+    )
+    ap.add_argument(
+        "--alignment-cfd-zone",
+        default=None,
+        help=(
+            "CFD zone used only as the alignment reference surface. "
+            "Default: first ingested zone containing 'hull'; required if none is available."
+        ),
+    )
+    ap.add_argument(
+        "--alignment-max-points",
+        type=int,
+        default=10000,
+        help="Maximum sampled structure/CFD points used by auto-alignment (default: 10000)",
+    )
+    ap.add_argument(
+        "--alignment-iterations",
+        type=int,
+        default=30,
+        help="Maximum trimmed similarity-ICP iterations (default: 30)",
+    )
+    ap.add_argument(
+        "--alignment-trim-fraction",
+        type=float,
+        default=0.80,
+        help="Fraction of closest ICP correspondences retained per iteration (default: 0.80)",
+    )
+    ap.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable coupling progress output",
@@ -62,6 +96,12 @@ def run_coupling(args: argparse.Namespace) -> int:
         raise ValueError("--batch-size must be > 0")
     if float(args.progress_interval) <= 0:
         raise ValueError("--progress-interval must be > 0")
+    if int(args.alignment_max_points) < 100:
+        raise ValueError("--alignment-max-points must be >= 100")
+    if int(args.alignment_iterations) < 1:
+        raise ValueError("--alignment-iterations must be >= 1")
+    if not 0.25 <= float(args.alignment_trim_fraction) <= 1.0:
+        raise ValueError("--alignment-trim-fraction must be in [0.25, 1.0]")
 
     with preserve_warning_filters():
         from cfd_bench.features.structure_cfd_coupling import StructureCfdCouplingEngine
@@ -84,6 +124,11 @@ def run_coupling(args: argparse.Namespace) -> int:
                 diagnostics=bool(args.diagnostics),
                 progress=not bool(args.no_progress),
                 progress_interval=float(args.progress_interval),
+                auto_align=bool(args.auto_align),
+                alignment_cfd_zone=args.alignment_cfd_zone,
+                alignment_max_points=int(args.alignment_max_points),
+                alignment_max_iterations=int(args.alignment_iterations),
+                alignment_trim_fraction=float(args.alignment_trim_fraction),
             )
         finally:
             repo.close()
@@ -92,6 +137,15 @@ def run_coupling(args: argparse.Namespace) -> int:
     print(f"  structure={summary.structure_dataset} zone={summary.structure_zone}")
     print(f"  cfd={summary.cfd_dataset} step={summary.cfd_step} zone={summary.cfd_zone}")
     print(f"  variables={list(summary.variables)}")
+    if summary.alignment_enabled:
+        print(
+            "  alignment="
+            f"enabled scale={summary.alignment_scale:.12g} "
+            f"reference_zone={summary.alignment_reference_zone} "
+            f"rmse={summary.alignment_rmse:.6g} confidence={summary.alignment_confidence}"
+        )
+    else:
+        print("  alignment=disabled")
     print(
         "  nodes="
         f"{summary.node_count} pass={summary.success_count} outside={summary.outside_count} "

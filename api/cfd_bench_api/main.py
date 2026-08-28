@@ -539,6 +539,27 @@ def create_app(config: Optional[ApiConfig] = None, *, start_worker: bool = True)
                         outside_count=int(meta.get("outside_count", 0)),
                         no_containing_cell_count=int(meta.get("no_containing_cell_count", 0)),
                         failed_count=int(meta.get("failed_count", 0)),
+                        alignment_enabled=bool(meta.get("alignment_enabled", False)),
+                        alignment_scale=(
+                            float(meta.get("alignment_scale"))
+                            if meta.get("alignment_scale") is not None
+                            else None
+                        ),
+                        alignment_reference_zone=(
+                            str(meta.get("alignment_reference_zone"))
+                            if meta.get("alignment_reference_zone") is not None
+                            else None
+                        ),
+                        alignment_rmse=(
+                            float(meta.get("alignment_rmse_after"))
+                            if meta.get("alignment_rmse_after") is not None
+                            else None
+                        ),
+                        alignment_confidence=(
+                            str(meta.get("alignment_confidence"))
+                            if meta.get("alignment_confidence") is not None
+                            else None
+                        ),
                     )
             except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 raise HTTPException(status_code=500, detail=f"invalid coupling H5 result: {exc}") from exc

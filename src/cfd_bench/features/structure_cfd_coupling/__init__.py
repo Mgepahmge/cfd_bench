@@ -1,5 +1,6 @@
 """Structure-to-CFD coupling feature."""
 
+from .alignment import AlignmentDiagnostics, SimilarityTransform, estimate_similarity_alignment
 from .engine import CouplingSummary, StructureCfdCouplingEngine
 from .output import (
     STATUS_CODES,
@@ -10,6 +11,9 @@ from .output import (
 )
 
 __all__ = [
+    "AlignmentDiagnostics",
+    "SimilarityTransform",
+    "estimate_similarity_alignment",
     "CouplingSummary",
     "StructureCfdCouplingEngine",
     "STATUS_CODES",

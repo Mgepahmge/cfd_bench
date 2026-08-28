@@ -47,6 +47,8 @@ class CouplingH5Writer:
         coordinates: np.ndarray,
         batch_size: int,
         diagnostics: bool,
+        alignment_metadata: Optional[Mapping[str, object]] = None,
+        store_coupling_coordinates: bool = False,
     ) -> None:
         try:
             import h5py
@@ -79,7 +81,20 @@ class CouplingH5Writer:
         meta.attrs["variables_json"] = json.dumps(list(self.variables), separators=(",", ":"))
         meta.attrs["interpolation_method"] = "piecewise-linear barycentric"
         meta.attrs["vertex_value_source"] = "mean of incident cell-centered CFD values"
-        meta.attrs["coordinate_frame"] = "as-ingested"
+        meta.attrs["source_coordinate_frame"] = "as-ingested"
+        meta.attrs["coordinate_frame"] = (
+            "similarity-aligned" if bool(store_coupling_coordinates) else "as-ingested"
+        )
+        meta.attrs["alignment_enabled"] = bool(store_coupling_coordinates)
+        if alignment_metadata:
+            for key, value in alignment_metadata.items():
+                attr = f"alignment_{key}"
+                if isinstance(value, np.ndarray):
+                    meta.attrs[attr] = json.dumps(value.tolist(), separators=(",", ":"))
+                elif isinstance(value, (list, tuple, dict)):
+                    meta.attrs[attr] = json.dumps(value, separators=(",", ":"))
+                elif value is not None:
+                    meta.attrs[attr] = value
         meta.attrs["status_codes_json"] = json.dumps(STATUS_CODES, separators=(",", ":"))
 
         nodes = self._fh.create_group("nodes")
@@ -95,12 +110,24 @@ class CouplingH5Writer:
             chunks=(chunk_rows,),
             compression="lzf",
         )
-        nodes.create_dataset(
+        source_coordinates = nodes.create_dataset(
             "coordinates",
             data=np.asarray(coordinates, dtype=np.float64),
             chunks=(chunk_rows, 3),
             compression="lzf",
         )
+        source_coordinates.attrs["frame"] = "as-ingested"
+        self._coupling_coordinates_ds = None
+        if bool(store_coupling_coordinates):
+            self._coupling_coordinates_ds = nodes.create_dataset(
+                "coupling_coordinates",
+                shape=(self.node_count, 3),
+                dtype="f8",
+                chunks=(chunk_rows, 3),
+                compression="lzf",
+                fillvalue=np.nan,
+            )
+            self._coupling_coordinates_ds.attrs["frame"] = "similarity-aligned"
 
         values = self._fh.create_group("values")
         self._value_ds = {
@@ -170,6 +197,7 @@ class CouplingH5Writer:
         status: np.ndarray,
         cfd_cell_ids: np.ndarray,
         reconstruction_error: np.ndarray,
+        coupling_coordinates: Optional[np.ndarray] = None,
         support_node_ids: Optional[np.ndarray] = None,
         weights: Optional[np.ndarray] = None,
     ) -> None:
@@ -185,6 +213,15 @@ class CouplingH5Writer:
         self._status_ds[a:b] = np.asarray(status, dtype=np.uint8)
         self._cell_ds[a:b] = np.asarray(cfd_cell_ids, dtype=np.int64)
         self._error_ds[a:b] = np.asarray(reconstruction_error, dtype=np.float64)
+        if self._coupling_coordinates_ds is not None:
+            if coupling_coordinates is None:
+                raise ValueError("aligned coupling output requires coupling_coordinates for every batch")
+            xyz = np.asarray(coupling_coordinates, dtype=np.float64)
+            if xyz.shape != (b - a, 3):
+                raise ValueError(
+                    f"coupling coordinate batch has shape {xyz.shape}; expected {(b - a, 3)}"
+                )
+            self._coupling_coordinates_ds[a:b, :] = xyz
         if self._support_ds is not None and support_node_ids is not None:
             self._support_ds[a:b, :] = np.asarray(support_node_ids, dtype=np.int64)
         if self._weight_ds is not None and weights is not None:

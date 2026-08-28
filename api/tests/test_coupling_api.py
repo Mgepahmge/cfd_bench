@@ -37,6 +37,11 @@ def test_coupling_command_builder_matches_core_cli(tmp_path):
         batch_size=8192,
         diagnostics=True,
         progress=False,
+        auto_align=True,
+        alignment_cfd_zone="0_Wall_hull",
+        alignment_max_points=5000,
+        alignment_iterations=25,
+        alignment_trim_fraction=0.75,
     )
     command = build_coupling_command(cfg, request, tmp_path / "coupling.h5")
     args = build_parser().parse_args(command[1:])
@@ -49,6 +54,11 @@ def test_coupling_command_builder_matches_core_cli(tmp_path):
     assert args.cfd_zone == "0_Fluid"
     assert args.batch_size == 8192
     assert args.diagnostics is True
+    assert args.auto_align is True
+    assert args.alignment_cfd_zone == "0_Wall_hull"
+    assert args.alignment_max_points == 5000
+    assert args.alignment_iterations == 25
+    assert args.alignment_trim_fraction == 0.75
     assert args.no_progress is True
 
 
@@ -93,6 +103,11 @@ def test_coupling_job_and_h5_result_endpoints(tmp_path):
             meta.attrs["outside_count"] = 1
             meta.attrs["no_containing_cell_count"] = 1
             meta.attrs["failed_count"] = 0
+            meta.attrs["alignment_enabled"] = True
+            meta.attrs["alignment_scale"] = 0.001
+            meta.attrs["alignment_reference_zone"] = "0_Wall_hull"
+            meta.attrs["alignment_rmse_after"] = 0.002
+            meta.attrs["alignment_confidence"] = "high"
         app.state.store.finish_job(job_id, status="succeeded", exit_code=0)
 
         summary = client.get(f"/api/v1/jobs/{job_id}/result")
@@ -102,6 +117,11 @@ def test_coupling_job_and_h5_result_endpoints(tmp_path):
         assert payload["node_count"] == 10
         assert payload["success_count"] == 8
         assert payload["variables"] == ["P", "U"]
+        assert payload["alignment_enabled"] is True
+        assert payload["alignment_scale"] == 0.001
+        assert payload["alignment_reference_zone"] == "0_Wall_hull"
+        assert payload["alignment_rmse"] == 0.002
+        assert payload["alignment_confidence"] == "high"
 
         download = client.get(f"/api/v1/jobs/{job_id}/result.h5")
         assert download.status_code == 200

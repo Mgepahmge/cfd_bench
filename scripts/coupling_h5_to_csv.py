@@ -70,6 +70,7 @@ def main() -> int:
         node_id = h5["nodes/node_id"]
         source_label = h5["nodes/source_node_label"]
         coords = h5["nodes/coordinates"]
+        coupling_coords = h5["nodes/coupling_coordinates"] if "coupling_coordinates" in h5["nodes"] else None
         status = h5["diagnostics/status"]
         cell_id = h5["diagnostics/cfd_cell_id"]
         error = h5["diagnostics/reconstruction_error"]
@@ -85,6 +86,7 @@ def main() -> int:
                     "x",
                     "y",
                     "z",
+                    *(["coupling_x", "coupling_y", "coupling_z"] if coupling_coords is not None else []),
                     "status",
                     "cfd_cell_id",
                     "reconstruction_error",
@@ -96,6 +98,11 @@ def main() -> int:
                 ids = np.asarray(node_id[start:end], dtype=np.int64)
                 labels = np.asarray(source_label[start:end], dtype=np.int64)
                 xyz = np.asarray(coords[start:end], dtype=np.float64)
+                mapped_xyz = (
+                    np.asarray(coupling_coords[start:end], dtype=np.float64)
+                    if coupling_coords is not None
+                    else None
+                )
                 st = np.asarray(status[start:end], dtype=np.uint8)
                 cells = np.asarray(cell_id[start:end], dtype=np.int64)
                 errors = np.asarray(error[start:end], dtype=np.float64)
@@ -108,6 +115,15 @@ def main() -> int:
                             f"{xyz[i, 0]:.17g}",
                             f"{xyz[i, 1]:.17g}",
                             f"{xyz[i, 2]:.17g}",
+                            *(
+                                [
+                                    f"{mapped_xyz[i, 0]:.17g}",
+                                    f"{mapped_xyz[i, 1]:.17g}",
+                                    f"{mapped_xyz[i, 2]:.17g}",
+                                ]
+                                if mapped_xyz is not None
+                                else []
+                            ),
                             status_codes.get(int(st[i]), str(int(st[i]))),
                             int(cells[i]),
                             "" if not np.isfinite(errors[i]) else f"{errors[i]:.17g}",

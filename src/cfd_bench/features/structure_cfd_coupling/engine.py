@@ -30,6 +30,7 @@ from cfd_bench.features.fluid_interpolation.engine import LinearSupport
 from cfd_bench.infra.iotdb.mesh_runtime import MeshRuntime
 from cfd_bench.infra.iotdb.repository import IoTDBRepository
 
+from .alignment import AlignmentDiagnostics, estimate_similarity_alignment
 from .output import (
     CouplingH5Writer,
     STATUS_INTERPOLATION_FAILED,
@@ -54,6 +55,11 @@ class CouplingSummary:
     outside_count: int
     no_containing_cell_count: int
     failed_count: int
+    alignment_enabled: bool = False
+    alignment_scale: Optional[float] = None
+    alignment_reference_zone: Optional[str] = None
+    alignment_rmse: Optional[float] = None
+    alignment_confidence: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -603,6 +609,78 @@ class StructureCfdCouplingEngine:
             result["weights"] = weights_out
         return result
 
+    @staticmethod
+    def _resolve_alignment_zone(
+        cfd_meta: dict,
+        resolved_cfd_zone: str,
+        requested_zone: Optional[str],
+    ) -> str:
+        if requested_zone:
+            return str(requested_zone)
+        hull_zones = [
+            str(zone)
+            for zone in cfd_meta.get("zones", ())
+            if "hull" in str(zone).lower()
+        ]
+        if hull_zones:
+            return hull_zones[0]
+        raise ValueError(
+            "auto-alignment requires a CFD hull/reference surface zone. "
+            "No ingested zone containing 'hull' was found; ingest the hull zone "
+            "or pass --alignment-cfd-zone explicitly. The full fluid-volume zone "
+            f"{resolved_cfd_zone!r} is intentionally not used for automatic alignment."
+        )
+
+    def _estimate_structure_alignment(
+        self,
+        structure_coordinates: np.ndarray,
+        *,
+        cfd_dataset: str,
+        resolved_cfd_zone: str,
+        requested_alignment_zone: Optional[str],
+        max_points: int,
+        max_iterations: int,
+        trim_fraction: float,
+        progress: CouplingProgress,
+    ) -> Tuple[AlignmentDiagnostics, str]:
+        cfd_meta = self.repo.cfd_dataset_metadata(str(cfd_dataset))
+        alignment_zone = self._resolve_alignment_zone(
+            cfd_meta, resolved_cfd_zone, requested_alignment_zone
+        )
+
+        progress.stage(
+            f"estimating optional structure/CFD similarity alignment using CFD zone={alignment_zone!r} ..."
+        )
+        if alignment_zone == resolved_cfd_zone and self._node_coordinates.size:
+            cfd_reference = self._node_coordinates
+        else:
+            _ids, cfd_reference = self.repo.fetch_nodes_arrays(str(cfd_dataset), alignment_zone)
+        cfd_reference = np.asarray(cfd_reference, dtype=np.float64).reshape(-1, 3)
+        if cfd_reference.shape[0] < 4:
+            raise ValueError(
+                f"alignment CFD zone={alignment_zone!r} contains fewer than 4 nodes; "
+                "ingest the hull/reference zone or specify another --alignment-cfd-zone"
+            )
+        result = estimate_similarity_alignment(
+            np.asarray(structure_coordinates, dtype=np.float64),
+            cfd_reference,
+            max_points=int(max_points),
+            max_iterations=int(max_iterations),
+            trim_fraction=float(trim_fraction),
+        )
+        progress.stage(
+            "alignment: "
+            f"scale={result.transform.scale:.12g} "
+            f"rmse={result.rmse_after:.6g} p95={result.p95_error:.6g} "
+            f"confidence={result.confidence}"
+        )
+        if result.confidence == "low":
+            progress.stage(
+                "warning: automatic alignment confidence is LOW; inspect the saved transform/coordinates "
+                "before using the coupled values for analysis."
+            )
+        return result, alignment_zone
+
     def couple_to_h5(
         self,
         *,
@@ -617,6 +695,11 @@ class StructureCfdCouplingEngine:
         diagnostics: bool = False,
         progress: bool = True,
         progress_interval: float = 0.25,
+        auto_align: bool = False,
+        alignment_cfd_zone: Optional[str] = None,
+        alignment_max_points: int = 10000,
+        alignment_max_iterations: int = 30,
+        alignment_trim_fraction: float = 0.80,
     ) -> CouplingSummary:
         batch_size = max(1, int(batch_size))
         reporter = CouplingProgress(enabled=progress, min_interval=progress_interval)
@@ -646,6 +729,44 @@ class StructureCfdCouplingEngine:
                 progress=reporter,
             )
 
+            alignment = None
+            resolved_alignment_zone = None
+            if bool(auto_align):
+                alignment, resolved_alignment_zone = self._estimate_structure_alignment(
+                    coordinates,
+                    cfd_dataset=str(cfd_dataset),
+                    resolved_cfd_zone=resolved_cfd_zone,
+                    requested_alignment_zone=alignment_cfd_zone,
+                    max_points=int(alignment_max_points),
+                    max_iterations=int(alignment_max_iterations),
+                    trim_fraction=float(alignment_trim_fraction),
+                    progress=reporter,
+                )
+
+            alignment_metadata = None
+            if alignment is not None:
+                alignment_metadata = {
+                    "method": alignment.method,
+                    "reference_zone": str(resolved_alignment_zone),
+                    "scale": float(alignment.transform.scale),
+                    "rotation": np.asarray(alignment.transform.rotation, dtype=np.float64),
+                    "translation": np.asarray(alignment.transform.translation, dtype=np.float64),
+                    "initial_scale": float(alignment.initial_scale),
+                    "rms_scale": float(alignment.rms_scale),
+                    "principal_scale": float(alignment.principal_scale),
+                    "principal_extent_scale": float(alignment.principal_extent_scale),
+                    "scale_consistency": float(alignment.scale_consistency),
+                    "rmse_before": float(alignment.rmse_before),
+                    "rmse_after": float(alignment.rmse_after),
+                    "median_error": float(alignment.median_error),
+                    "p95_error": float(alignment.p95_error),
+                    "inlier_fraction": float(alignment.inlier_fraction),
+                    "iterations": int(alignment.iterations),
+                    "structure_sample_count": int(alignment.structure_sample_count),
+                    "cfd_sample_count": int(alignment.cfd_sample_count),
+                    "confidence": str(alignment.confidence),
+                }
+
             reporter.stage(f"creating independent coupling result: {Path(output_path)}")
             writer = CouplingH5Writer(
                 output_path,
@@ -660,6 +781,8 @@ class StructureCfdCouplingEngine:
                 coordinates=coordinates,
                 batch_size=batch_size,
                 diagnostics=diagnostics,
+                alignment_metadata=alignment_metadata,
+                store_coupling_coordinates=alignment is not None,
             )
 
             counts = {
@@ -672,7 +795,11 @@ class StructureCfdCouplingEngine:
             reporter.update(0, total)
             for start in range(0, total, batch_size):
                 end = min(start + batch_size, total)
-                batch = self._map_batch(coordinates[start:end], diagnostics=diagnostics)
+                source_points = coordinates[start:end]
+                coupling_points = (
+                    alignment.transform.apply(source_points) if alignment is not None else source_points
+                )
+                batch = self._map_batch(coupling_points, diagnostics=diagnostics)
                 writer.write_batch(
                     start,
                     end,
@@ -680,6 +807,7 @@ class StructureCfdCouplingEngine:
                     status=batch["status"],
                     cfd_cell_ids=batch["cfd_cell_ids"],
                     reconstruction_error=batch["reconstruction_error"],
+                    coupling_coordinates=coupling_points if alignment is not None else None,
                     support_node_ids=batch.get("support_node_ids"),
                     weights=batch.get("weights"),
                 )
@@ -717,6 +845,11 @@ class StructureCfdCouplingEngine:
                 outside_count=summary_attrs["outside_count"],
                 no_containing_cell_count=summary_attrs["no_containing_cell_count"],
                 failed_count=summary_attrs["failed_count"],
+                alignment_enabled=alignment is not None,
+                alignment_scale=(float(alignment.transform.scale) if alignment is not None else None),
+                alignment_reference_zone=resolved_alignment_zone,
+                alignment_rmse=(float(alignment.rmse_after) if alignment is not None else None),
+                alignment_confidence=(str(alignment.confidence) if alignment is not None else None),
             )
         except Exception:
             if writer is not None:

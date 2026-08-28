@@ -433,9 +433,28 @@ global bounding box; a point may still have no containing CFD cell because of me
 
 `couple` maps every node of an H5 structural dataset to one selected CFD frame.
 Both datasets only need the IoTDB backend; no PostgreSQL/TileDB ingest is
-required for this feature.  Structural nodes use the coordinates persisted by
-H5 ingest, so the structural and CFD datasets must already use the same global
-coordinate system.
+required for this feature.  By default, structural nodes use the coordinates
+persisted by H5 ingest unchanged, so existing coupling behavior is preserved.
+
+If the two models represent the same geometry but use different uniform scale,
+orientation, or origin, enable the opt-in similarity alignment:
+
+```bash
+cfd-bench couple \
+  --structure-dataset structure_01 \
+  --cfd-dataset flow_default \
+  --cfd-step 1000 \
+  --auto-align \
+  --alignment-cfd-zone 0_Wall_hull \
+  --output ./aligned-coupling.h5
+```
+
+`--auto-align` is disabled unless explicitly requested.  It estimates one global
+`scale * rotation + translation` transform with trimmed similarity ICP and an
+Umeyama solve; the three axes are never stretched independently.  If
+`--alignment-cfd-zone` is omitted, an ingested CFD zone containing `hull` is
+selected automatically. If no hull/reference zone is available, alignment stops
+with an error rather than incorrectly fitting against the full fluid volume.
 
 ```bash
 cfd-bench ingest-h5 --h5 structure.h5 --datasets structure_01 --backends iotdb
@@ -462,6 +481,7 @@ The canonical result is a new independent HDF5 file:
 /nodes/node_id
 /nodes/source_node_label
 /nodes/coordinates
+/nodes/coupling_coordinates     # only when --auto-align is enabled
 /values/<variable>
 /diagnostics/status
 /diagnostics/cfd_cell_id
@@ -470,8 +490,12 @@ The canonical result is a new independent HDF5 file:
 
 `--diagnostics` additionally stores four support CFD node IDs and barycentric
 weights for every successfully mapped point.  Points outside the CFD mesh are
-recorded per-node and do not fail the whole coupling job.  The original H5 and
-IoTDB datasets are never modified.
+recorded per-node and do not fail the whole coupling job.  When auto-alignment
+is enabled, the estimated scale/rotation/translation and fit-quality metrics are
+written to `/metadata`; `/nodes/coordinates` remains the original structure
+coordinates while `/nodes/coupling_coordinates` records the transformed points
+actually used for interpolation.  The original H5 and IoTDB datasets are never
+modified.
 
 CSV is intentionally not part of the core path.  Convert a finished result
 with the standalone utility when needed:

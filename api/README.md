@@ -265,13 +265,19 @@ Content-Type: application/json
   "variables": ["U", "V", "W", "P"],
   "batch_size": 4096,
   "diagnostics": false,
-  "progress": true
+  "progress": true,
+  "auto_align": false
 }
 ```
 
 Both source datasets must already exist in IoTDB (`h5` for the structure and
 Tecplot CFD for the fluid data).  The job writes an independent canonical H5
-result under its job directory.  After success:
+result under its job directory.  Coordinate alignment is opt-in: set
+`"auto_align": true` to estimate one uniform 3-D similarity transform before
+interpolation.  `alignment_cfd_zone` can explicitly select the hull/reference
+zone; otherwise a zone containing `hull` is selected automatically. If no
+hull/reference zone is available, the alignment job fails instead of fitting
+against the full fluid-volume mesh. After success:
 
 - `GET /api/v1/jobs/{job_id}/result` returns the small coupling summary.
 - `GET /api/v1/jobs/{job_id}/result.h5` downloads the canonical H5 result.

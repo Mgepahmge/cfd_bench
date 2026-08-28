@@ -146,6 +146,13 @@ def build_coupling_command(
         command.extend(["--cfd-zone", request.cfd_zone])
     if request.diagnostics:
         command.append("--diagnostics")
+    if request.auto_align:
+        command.append("--auto-align")
+        if request.alignment_cfd_zone:
+            command.extend(["--alignment-cfd-zone", request.alignment_cfd_zone])
+        command.extend(["--alignment-max-points", str(request.alignment_max_points)])
+        command.extend(["--alignment-iterations", str(request.alignment_iterations)])
+        command.extend(["--alignment-trim-fraction", str(request.alignment_trim_fraction)])
     if not request.progress:
         command.append("--no-progress")
     return command
