@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
+from cfd_bench.core.context import parse_dataset_key
 from cfd_bench.ingest.common.dat_files import dat_dir, iter_dat_files, topology_dat_file
 
 
@@ -128,10 +129,8 @@ def ingest_all(
     if not os.path.isfile(dat_path) and not os.path.isdir(dat_path):
         raise FileNotFoundError(dat_path)
 
-    if "_" in ship:
-        ship_type, scale = ship.split("_", 1)
-    else:
-        ship_type, scale = ship, "default"
+    key = parse_dataset_key(ship)
+    ship_type, scale = key.ship, key.scale
     report = IngestReport()
     selected = _normalize_backends(backends)
 
